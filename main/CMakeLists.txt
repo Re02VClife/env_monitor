@@ -1,0 +1,21 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "app_core.c"
+        "app_display.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        nvs_flash
+        esp_lcd
+        esp_psram
+        esp_timer
+        driver
+    PRIV_REQUIRES
+        sgp30_driver
+        aht30_driver
+        st7789_display
+        ws2812_led
+        nvs_storage
+        display_assets
+)
