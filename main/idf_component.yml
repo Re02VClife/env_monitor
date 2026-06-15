@@ -1,0 +1,7 @@
+dependencies:
+  lvgl/lvgl:
+    version: "^9.0"
+    public: true
+  espressif/led_strip:
+    version: "^2.5"
+    public: true
