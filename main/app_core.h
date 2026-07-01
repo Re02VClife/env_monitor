@@ -14,7 +14,6 @@ extern "C" {
  * @brief 初始化传感器子系统
  *        - 创建两条 I2C 总线
  *        - 初始化 AHT30、SGP30、NVS 存储、WS2812B
- *        注意: 不执行 SGP30 IAQ 初始化（预热在 sensor_task 中执行）
  * @return ESP_OK 成功
  */
 esp_err_t app_core_init(void);

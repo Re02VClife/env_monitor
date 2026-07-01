@@ -13,7 +13,7 @@
 /* ---- 硬件引脚 ---- */
 #define LCD_SPI_HOST        SPI2_HOST
 #define LCD_SCLK_IO         GPIO_NUM_21
-#define LCD_MOSI_IO         GPIO_NUM_42   /* 避开 GPIO47(PSRAM DQS) 和 GPIO46(Strapping) */
+#define LCD_MOSI_IO         GPIO_NUM_47
 #define LCD_CS_IO           GPIO_NUM_41
 #define LCD_DC_IO           GPIO_NUM_40
 #define LCD_RST_IO          GPIO_NUM_45
