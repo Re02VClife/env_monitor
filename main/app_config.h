@@ -14,9 +14,13 @@ extern "C" {
  * I2C 总线引脚 — 两条独立总线，物理隔离传感器
  * ================================================================ */
 
-/* I2C 总线：AHT30 (0x38) + SGP30 (0x58) 共用，地址不同不冲突 */
-#define I2C_SCL_IO      GPIO_NUM_2
-#define I2C_SDA_IO      GPIO_NUM_1
+/* I2C 总线 0：AHT30 (0x38) */
+#define I2C0_SCL_IO     GPIO_NUM_5
+#define I2C0_SDA_IO     GPIO_NUM_6
+
+/* I2C 总线 1：SGP30 (0x58) */
+#define I2C1_SCL_IO     GPIO_NUM_19
+#define I2C1_SDA_IO     GPIO_NUM_20
 
 /* I2C 设备地址（仅文档参考，实际由各驱动内部定义） */
 /* I2C 总线频率（当前使用默认值，未通过宏配置） */
@@ -38,7 +42,7 @@ extern "C" {
  * ================================================================ */
 
 #define SAMPLE_INTERVAL_MS          1000    /* 传感器采样间隔 */
-#define BASELINE_SAVE_INTERVAL_S    60      /* SGP30 基线保存周期 */
+/* 基线不再定时自动保存（会导致算法锁死在 400ppm），改为手动校准触发 */
 #define CO2_WARN_THRESHOLD          800     /* CO2 黄色警告 (ppm) */
 #define CO2_ALERT_THRESHOLD         1200    /* CO2 红色警报 (ppm) */
 
