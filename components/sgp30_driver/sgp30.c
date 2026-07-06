@@ -156,6 +156,35 @@ esp_err_t sgp30_init(i2c_master_bus_handle_t bus_handle)
     return ESP_OK;
 }
 
+esp_err_t sgp30_reset(i2c_master_bus_handle_t bus_handle)
+{
+    /* I2C General Call Reset: 广播地址 0x00, 数据 0x06
+     * SGP30 收到后将芯片完全恢复到出厂上电状态 */
+    i2c_device_config_t gc_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address  = 0x00,       /* General Call 广播地址 */
+        .scl_speed_hz    = 100000,
+    };
+    i2c_master_dev_handle_t gc_handle = NULL;
+    esp_err_t ret = i2c_master_bus_add_device(bus_handle, &gc_cfg, &gc_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "无法创建 General Call 设备句柄: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    uint8_t reset_cmd = 0x06;
+    ret = i2c_master_transmit(gc_handle, &reset_cmd, 1, 50);
+    /* General Call 通常不被 ACK，NACK 是正常行为 */
+
+    i2c_master_bus_rm_device(gc_handle);
+
+    /* SGP30 复位后需要 ≥0.5ms */
+    vTaskDelay(pdMS_TO_TICKS(10));
+    ESP_LOGI(TAG, "SGP30 硬件复位完成 (General Call)");
+
+    return ESP_OK;
+}
+
 esp_err_t sgp30_iaq_init(i2c_master_bus_handle_t bus_handle)
 {
     if (dev_handle == NULL) {
