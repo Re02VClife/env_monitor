@@ -31,6 +31,15 @@ typedef struct {
 esp_err_t sgp30_init(i2c_master_bus_handle_t bus_handle);
 
 /**
+ * @brief 硬件复位 — I2C General Call Reset
+ *        将 SGP30 恢复到出厂状态，比 IAQ_INIT 更彻底
+ *        复位后必须重新调用 sgp30_iaq_init()
+ * @param bus_handle I2C 总线句柄
+ * @return ESP_OK 成功
+ */
+esp_err_t sgp30_reset(i2c_master_bus_handle_t bus_handle);
+
+/**
  * @brief 启动 IAQ 初始化（15 秒预热）—— 上电后必须调用
  *        内部会阻塞等待传感器完成初始化
  * @param bus_handle I2C 总线句柄

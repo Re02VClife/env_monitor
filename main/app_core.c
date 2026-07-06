@@ -145,10 +145,10 @@ void app_core_sensor_task(void *arg)
 
     if (sgp30_available) {
         ESP_LOGI(TAG, "--- 预热阶段 (SGP30) ---");
-        ESP_LOGI(TAG, "基线从默认值开始自学习，约 12 小时后达到最优精度");
+        ESP_LOGI(TAG, "执行硬件复位 + IAQ 初始化...");
 
-        ESP_LOGI(TAG, "SGP30 IAQ 初始化中...");
-        esp_err_t iaq_ret = sgp30_iaq_init(i2c_bus1);
+        sgp30_reset(i2c_bus1);              /* 硬件复位，恢复到出厂状态 */
+        esp_err_t iaq_ret = sgp30_iaq_init(i2c_bus1);  /* 15 秒预热 */
         if (iaq_ret != ESP_OK) {
             ESP_LOGW(TAG, "SGP30 IAQ 初始化失败，仅采集温湿度");
             sgp30_ready = false;
@@ -198,10 +198,11 @@ void app_core_sensor_task(void *arg)
         if (sgp30_available &&
             (esp_timer_get_time() - last_iaq_reset_us) >= iaq_reset_interval_us) {
 
-            ESP_LOGI(TAG, "--- 定时 IAQ 复位 (每 %d 小时) ---", IAQ_RESET_INTERVAL_H);
+            ESP_LOGI(TAG, "--- 定时硬件复位 + IAQ 重启 (每 %d 小时) ---", IAQ_RESET_INTERVAL_H);
             ws2812_set_color(LED_COLOR_BLUE);
 
-            esp_err_t iaq_ret = sgp30_iaq_init(i2c_bus1);
+            sgp30_reset(i2c_bus1);          /* 硬件复位，清除可能的卡死状态 */
+            esp_err_t iaq_ret = sgp30_iaq_init(i2c_bus1);  /* 重新初始化 IAQ */
             sgp30_ready = (iaq_ret == ESP_OK);
 
             last_iaq_reset_us = esp_timer_get_time();
