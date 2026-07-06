@@ -1,19 +1,11 @@
 /*
  * app_core.c — 传感器采集核心逻辑
  *
- * 状态机:
- *   INIT → WARMUP (SGP30 IAQ 初始化, 15s) → RUNNING (每秒采集)
- *
- * 数据流:
- *   AHT30 → 温湿度 + 绝对湿度补偿 → SGP30 → CO2/TVOC
- *        ↓
- *   app_display_update() → 界面刷新
- *   ws2812_set_co2_level() → LED 颜色指示
- *
- * 基线策略:
- *   不保存、不恢复基线。让 SGP30 每次上电从默认状态自学习，
- *   避免预存基线导致算法过早收敛到 400ppm。
- *   SGP30 会在运行中持续自校准，前 12 小时精度逐步提升。
+ * 基线策略（智能自动，无需手动干预）:
+ *   启动时 → 恢复已保存的基线（维持校准连续性）
+ *   运行时 → 仅在 CO2 连续 ≤ 450ppm 超过 1 小时后才保存基线
+ *             确保基线只记录「真正的新鲜空气」，不被高浓度污染
+ *   不复位  → 传感器持续运行，达到 12 小时最优精度后保持稳定
  */
 #include "app_core.h"
 #include "app_config.h"
@@ -36,19 +28,11 @@ static const char *TAG = "app_core";
 static i2c_master_bus_handle_t i2c_bus0 = NULL;  /* AHT30 */
 static i2c_master_bus_handle_t i2c_bus1 = NULL;  /* SGP30 */
 
-/* SGP30 可用标志（由 app_core_init 设置，sensor_task 读取） */
+/* SGP30 可用标志 */
 static bool sgp30_available = false;
 
 /* ----------------------------------------------------------------
  * 绝对湿度计算（用于 SGP30 湿度补偿）
- *
- * 输入:  温度 T (°C), 相对湿度 RH (%)
- * 输出:  绝对湿度 (g/m³)
- *
- * 公式:
- *   饱和蒸气压  es = 6.112 × exp(17.67 × T / (T + 243.5))   [hPa]
- *   实际蒸气压  e  = es × RH / 100
- *   绝对湿度    AH = 216.7 × e / (T + 273.15)              [g/m³]
  * ---------------------------------------------------------------- */
 static float compute_abs_humidity(float temperature, float humidity)
 {
@@ -63,7 +47,6 @@ static float compute_abs_humidity(float temperature, float humidity)
  * ---------------------------------------------------------------- */
 static esp_err_t i2c_bus_init(void)
 {
-    /* 总线 0：AHT30 */
     i2c_master_bus_config_t cfg0 = {
         .i2c_port    = I2C_NUM_0,
         .sda_io_num  = I2C0_SDA_IO,
@@ -76,7 +59,6 @@ static esp_err_t i2c_bus_init(void)
     ESP_LOGI(TAG, "I2C 总线0 初始化完成 (SDA=IO%d, SCL=IO%d)",
              I2C0_SDA_IO, I2C0_SCL_IO);
 
-    /* 总线 1：SGP30 */
     i2c_master_bus_config_t cfg1 = {
         .i2c_port    = I2C_NUM_1,
         .sda_io_num  = I2C1_SDA_IO,
@@ -100,19 +82,14 @@ esp_err_t app_core_init(void)
 {
     ESP_LOGI(TAG, "初始化传感器子系统...");
 
-    /* 1. I2C 总线 */
     ESP_ERROR_CHECK(i2c_bus_init());
-
-    /* 2. NVS 存储 */
     ESP_ERROR_CHECK(nvs_storage_init());
 
-    /* 3. AHT30 温湿度传感器 (I2C 总线0，地址 0x38) */
     esp_err_t ret = aht30_init(i2c_bus0);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "AHT30 初始化失败: %s，跳过", esp_err_to_name(ret));
     }
 
-    /* 4. SGP30 气体传感器 (I2C 总线1，地址 0x58) */
     ret = sgp30_init(i2c_bus1);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "SGP30 初始化失败: %s，跳过", esp_err_to_name(ret));
@@ -121,7 +98,6 @@ esp_err_t app_core_init(void)
         sgp30_available = true;
     }
 
-    /* 5. WS2812B LED（失败不中止） */
     ret = ws2812_init();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "WS2812B 初始化失败: %s，跳过", esp_err_to_name(ret));
@@ -138,17 +114,29 @@ void app_core_sensor_task(void *arg)
     ESP_LOGI(TAG, "传感器任务启动 (core %d)", xPortGetCoreID());
 
     /* ============================================================
-     * 阶段 1: WARMUP — SGP30 IAQ 预热 (15 秒)
-     * 不恢复历史基线，让传感器从出厂默认状态自学习
+     * 阶段 1: WARMUP — 恢复基线 + IAQ 预热 (15 秒)
      * ============================================================ */
     bool sgp30_ready = false;
+    bool baseline_was_restored = false;
 
     if (sgp30_available) {
         ESP_LOGI(TAG, "--- 预热阶段 (SGP30) ---");
-        ESP_LOGI(TAG, "执行硬件复位 + IAQ 初始化...");
 
-        sgp30_reset(i2c_bus1);              /* 硬件复位，恢复到出厂状态 */
-        esp_err_t iaq_ret = sgp30_iaq_init(i2c_bus1);  /* 15 秒预热 */
+        /* 尝试恢复已保存的基线（仅在新鲜空气中保存过的） */
+        uint16_t saved_co2_base = 0, saved_tvoc_base = 0;
+        if (nvs_load_sgp30_baseline(&saved_co2_base, &saved_tvoc_base) == ESP_OK
+            && saved_co2_base > 0) {
+            sgp30_baseline_t baseline = {
+                .co2_baseline  = saved_co2_base,
+                .tvoc_baseline = saved_tvoc_base,
+            };
+            sgp30_set_baseline(i2c_bus1, &baseline);
+            baseline_was_restored = true;
+        } else {
+            ESP_LOGI(TAG, "无有效基线，使用出厂默认值（约 12 小时后达到最优精度）");
+        }
+
+        esp_err_t iaq_ret = sgp30_iaq_init(i2c_bus1);
         if (iaq_ret != ESP_OK) {
             ESP_LOGW(TAG, "SGP30 IAQ 初始化失败，仅采集温湿度");
             sgp30_ready = false;
@@ -162,15 +150,16 @@ void app_core_sensor_task(void *arg)
     ws2812_set_color(LED_COLOR_GREEN);
 
     /* ============================================================
-     * 阶段 2: RUNNING — 定时采集循环
-     * 每秒: AHT30 → 湿度补偿 → SGP30 → 更新显示 → LED
-     * 每 IAQ_RESET_INTERVAL_H 小时: 重新初始化 SGP30 IAQ，
-     *   阻止基线在持续高 CO2 环境中深度收敛到 400ppm
+     * 阶段 2: RUNNING — 连续采集，不复位
+     * 智能基线: 仅在确认空气新鲜时自动保存
      * ============================================================ */
-    ESP_LOGI(TAG, "--- 运行阶段 (IAQ 每 %d 小时复位) ---", IAQ_RESET_INTERVAL_H);
+    ESP_LOGI(TAG, "--- 运行阶段 (智能基线: CO2≤%dppm 持续%ds 后自动保存) ---",
+             BASELINE_CLEAN_CO2_MAX, BASELINE_CLEAN_HOLD_S);
+    ESP_LOGI(TAG, "传感器持续运行，不复位，长期稳定");
+
     TickType_t last_wake = xTaskGetTickCount();
-    int64_t last_iaq_reset_us = esp_timer_get_time();
-    const int64_t iaq_reset_interval_us = (int64_t)IAQ_RESET_INTERVAL_H * 3600 * 1000000;
+    uint32_t clean_air_seconds = 0;       /* 连续低 CO2 秒数 */
+    bool baseline_saved_this_session = false;
 
     while (1) {
         aht30_data_t env = { .temperature = 0.0f, .humidity = 0.0f };
@@ -194,19 +183,28 @@ void app_core_sensor_task(void *arg)
                            gas.co2_ppm, gas.tvoc_ppb);
         if (sgp30_ready) ws2812_set_co2_level(gas.co2_ppm);
 
-        /* ---- 定时 IAQ 复位: 阻止基线深度收敛 ---- */
-        if (sgp30_available &&
-            (esp_timer_get_time() - last_iaq_reset_us) >= iaq_reset_interval_us) {
+        /* ---- 智能基线保存: CO2 连续低于阈值超过指定时间才保存 ---- */
+        if (sgp30_ready && gas.co2_ppm > 0) {
+            if (gas.co2_ppm <= BASELINE_CLEAN_CO2_MAX) {
+                clean_air_seconds++;
+            } else {
+                clean_air_seconds = 0;   /* CO2 升高，计数器清零 */
+            }
 
-            ESP_LOGI(TAG, "--- 定时硬件复位 + IAQ 重启 (每 %d 小时) ---", IAQ_RESET_INTERVAL_H);
-            ws2812_set_color(LED_COLOR_BLUE);
+            /* 达到持续时间要求 → 确认是新鲜空气 → 保存基线 */
+            if (clean_air_seconds >= BASELINE_CLEAN_HOLD_S
+                && !baseline_saved_this_session) {
 
-            sgp30_reset(i2c_bus1);          /* 硬件复位，清除可能的卡死状态 */
-            esp_err_t iaq_ret = sgp30_iaq_init(i2c_bus1);  /* 重新初始化 IAQ */
-            sgp30_ready = (iaq_ret == ESP_OK);
-
-            last_iaq_reset_us = esp_timer_get_time();
-            ws2812_set_color(LED_COLOR_GREEN);
+                sgp30_baseline_t cur_baseline;
+                if (sgp30_get_baseline(i2c_bus1, &cur_baseline) == ESP_OK) {
+                    nvs_save_sgp30_baseline(cur_baseline.co2_baseline,
+                                            cur_baseline.tvoc_baseline);
+                    baseline_saved_this_session = true;
+                    ESP_LOGI(TAG, "✅ 智能基线已保存 (CO2≤%dppm 持续 %ds)",
+                             BASELINE_CLEAN_CO2_MAX, BASELINE_CLEAN_HOLD_S);
+                }
+                clean_air_seconds = 0;   /* 保存后清零，本会话不再保存 */
+            }
         }
 
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(SAMPLE_INTERVAL_MS));
