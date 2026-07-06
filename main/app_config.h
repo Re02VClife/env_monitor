@@ -42,7 +42,8 @@ extern "C" {
  * ================================================================ */
 
 #define SAMPLE_INTERVAL_MS          1000    /* 传感器采样间隔 */
-/* 基线不再定时自动保存（会导致算法锁死在 400ppm），改为手动校准触发 */
+#define IAQ_RESET_INTERVAL_H        6       /* SGP30 IAQ 定期复位间隔（小时），防止基线深度收敛 */
+/* 基线不保存不恢复，SGP30 每次上电从默认状态自学习 */
 #define CO2_WARN_THRESHOLD          800     /* CO2 黄色警告 (ppm) */
 #define CO2_ALERT_THRESHOLD         1200    /* CO2 红色警报 (ppm) */
 

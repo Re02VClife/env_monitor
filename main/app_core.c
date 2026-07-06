@@ -147,7 +147,6 @@ void app_core_sensor_task(void *arg)
         ESP_LOGI(TAG, "--- 预热阶段 (SGP30) ---");
         ESP_LOGI(TAG, "基线从默认值开始自学习，约 12 小时后达到最优精度");
 
-        /* 执行 SGP30 IAQ 初始化（内部阻塞 15 秒） */
         ESP_LOGI(TAG, "SGP30 IAQ 初始化中...");
         esp_err_t iaq_ret = sgp30_iaq_init(i2c_bus1);
         if (iaq_ret != ESP_OK) {
@@ -160,19 +159,20 @@ void app_core_sensor_task(void *arg)
         ESP_LOGI(TAG, "--- 跳过预热阶段 (SGP30 不可用) ---");
     }
 
-    /* 初始化完成后 LED 变绿 */
     ws2812_set_color(LED_COLOR_GREEN);
 
     /* ============================================================
      * 阶段 2: RUNNING — 定时采集循环
      * 每秒: AHT30 → 湿度补偿 → SGP30 → 更新显示 → LED
-     * 不保存基线，SGP30 内部自校准持续运行
+     * 每 IAQ_RESET_INTERVAL_H 小时: 重新初始化 SGP30 IAQ，
+     *   阻止基线在持续高 CO2 环境中深度收敛到 400ppm
      * ============================================================ */
-    ESP_LOGI(TAG, "--- 运行阶段 ---");
+    ESP_LOGI(TAG, "--- 运行阶段 (IAQ 每 %d 小时复位) ---", IAQ_RESET_INTERVAL_H);
     TickType_t last_wake = xTaskGetTickCount();
+    int64_t last_iaq_reset_us = esp_timer_get_time();
+    const int64_t iaq_reset_interval_us = (int64_t)IAQ_RESET_INTERVAL_H * 3600 * 1000000;
 
     while (1) {
-        /* ---- 采集传感器（失败用默认值，不阻塞界面刷新）---- */
         aht30_data_t env = { .temperature = 0.0f, .humidity = 0.0f };
         sgp30_data_t gas  = { .co2_ppm = 0, .tvoc_ppb = 0 };
         float abs_hum = 0.0f;
@@ -190,14 +190,24 @@ void app_core_sensor_task(void *arg)
             ESP_LOGW(TAG, "AHT30 读取失败，使用默认值刷新界面");
         }
 
-        /* ---- 更新仪表盘（传感器失败也刷新）---- */
         app_display_update(env.temperature, env.humidity,
                            gas.co2_ppm, gas.tvoc_ppb);
-
-        /* ---- 更新 WS2812B LED 颜色 ---- */
         if (sgp30_ready) ws2812_set_co2_level(gas.co2_ppm);
 
-        /* 等待下一采样周期 */
+        /* ---- 定时 IAQ 复位: 阻止基线深度收敛 ---- */
+        if (sgp30_available &&
+            (esp_timer_get_time() - last_iaq_reset_us) >= iaq_reset_interval_us) {
+
+            ESP_LOGI(TAG, "--- 定时 IAQ 复位 (每 %d 小时) ---", IAQ_RESET_INTERVAL_H);
+            ws2812_set_color(LED_COLOR_BLUE);
+
+            esp_err_t iaq_ret = sgp30_iaq_init(i2c_bus1);
+            sgp30_ready = (iaq_ret == ESP_OK);
+
+            last_iaq_reset_us = esp_timer_get_time();
+            ws2812_set_color(LED_COLOR_GREEN);
+        }
+
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(SAMPLE_INTERVAL_MS));
     }
 }
