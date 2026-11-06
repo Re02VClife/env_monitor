@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_err.h"
 #include "esp_system.h"
 #include "esp_psram.h"
 #include "nvs_flash.h"
@@ -52,8 +53,17 @@ static void button_task(void *arg)
                 ESP_LOGW(TAG, "关机键长按，进入 deep sleep...");
                 vTaskDelay(pdMS_TO_TICKS(200));
 
-                /* 配置 IO39 为 RTC 唤醒源 (低电平唤醒) */
-                esp_sleep_enable_ext0_wakeup(BTN_POWER_GPIO, 0);
+                /* ⚠️ ESP32-S3 的 ext0/ext1 唤醒只支持 RTC GPIO(0~21)，IO39 不在其列，
+                 *    该调用会返回 ESP_ERR_INVALID_ARG。以前忽略返回值直接睡下去，
+                 *    结果是没有任何唤醒源 = 只能拔电。宁可放弃休眠也不能变砖。 */
+                esp_err_t err = esp_sleep_enable_ext0_wakeup(BTN_POWER_GPIO, 0);
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "IO%d 不是 RTC GPIO，不能作为深睡唤醒源 (%s)，已取消休眠",
+                             BTN_POWER_GPIO, esp_err_to_name(err));
+                    power_cnt = 0;
+                    vTaskDelay(pdMS_TO_TICKS(2000));
+                    continue;
+                }
                 esp_deep_sleep_start();
             }
         } else {
