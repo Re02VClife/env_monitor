@@ -9,6 +9,9 @@ menu "Dry Rack 干湿衣架"
             bool "原 ESP32-S3-WROOM-1 板 (I2C=IO5/IO6, LCD MOSI=IO47)"
         config DRYRACK_BOARD_FREENOVE
             bool "Freenove ESP32-S3 WROOM (I2C=IO1/IO2, LCD MOSI=IO42)"
+            help
+                注意：本项目自制板的 IO2 已接电池电压分压电路，
+                在该板上选此项会与电量检测网络冲突，只有换用 Freenove 开发板时才选。
     endchoice
 
     config DRYRACK_LCD_BL_GPIO

@@ -27,30 +27,100 @@
 | 元件 | 型号 |
 |------|------|
 | MCU | ESP32-S3-WROOM-1-N16R8 (Octal PSRAM 8MB) |
-| 显示屏 | ST7789V SPI 2.4" 320×240 |
+| 显示屏 | ST7789V SPI TFT 320×240 |
 | 温湿度传感器 | AHT30 (I²C 0x38) |
 | RGB 灯 | WS2812B 5050 |
 | ~~气体传感器~~ | ~~SGP30~~ **已拆除** |
 
 ### 引脚连接
 
-板型在 `idf.py menuconfig` → **Dry Rack 干湿衣架** → **硬件板型** 里选择，默认「原 ESP32-S3-WROOM-1 板」。
+板型在 `idf.py menuconfig` → **Dry Rack 干湿衣架** → **硬件板型** 里选择，默认「原 ESP32-S3-WROOM-1 板」，
+这一项对应的就是下面这张原理图的自制板。
 
-| 功能 | 原板 | Freenove 板 |
-|------|------|-------------|
+下表由仓库内 [原理图](docs/hardware/schematic.png) 逐脚核对得出：
+
+| 功能 | 本板（原理图） | Freenove 板 |
+|------|---------------|-------------|
 | I²C SDA | IO6 | IO1 |
 | I²C SCL | IO5 | IO2 |
 | LCD SCK | IO21 | IO21 |
 | LCD MOSI | IO47 | IO42 |
-| LCD RST / DC / CS | IO45 / IO40 / IO41 | 同左 |
-| WS2812B | IO48 | IO48 |
+| LCD RST | IO45 | IO45 |
+| LCD DC | IO40 | IO40 |
+| LCD CS | IO41 | IO41 |
+| LCD 背光 BLK | **悬空（常亮）** | — |
+| WS2812B DIN | IO48（VDD 接 5 V） | IO48 |
 | 重启键 | IO38 | IO38 |
 | 开关机键 | IO39 | IO39 |
-| BOOT 键（唤醒源） | IO0 | IO0 |
-| LCD 背光（可选） | 默认不控制，见下文 | |
+| BOOT 键（唤醒源） | IO0（R2 10K 上拉 + C5 100nF） | IO0 |
+| 电池电压检测 | IO2（R3/R4 100K 分压 + C6 100nF） | — |
 
 > ⚠️ ESP32-S3 只有 **GPIO0 ~ GPIO21** 属于 RTC IO，能在深睡中作为唤醒源。
 > 本项目用板载 **BOOT 键 (GPIO0)** 做唤醒，开关机键 (IO39) 只负责「进入低功耗」。
+
+### 本板的三个硬件约束
+
+**1. TFT 背光 BLK 悬空 —— 软件关不掉背光**
+
+原理图里 TFT 7pin 的 `BLK` 脚打了叉（未连接），背光直接由模块 VCC 供电、上电常亮。
+
+后果是低功耗模式只能把 LCD 控制器 `DISPOFF` 成黑屏，**背光仍会持续耗电（十几 mA 量级）**，
+深睡周期里的平均功耗会被它拉高。
+
+想真正省电可以飞一根线，把 `BLK` 改接到某个空闲 IO（例如 IO19 / IO20），
+再到 menuconfig 里填 **LCD 背光控制 GPIO**，休眠时就会把它拉低。
+
+**2. IO2 已被电池电压检测占用**
+
+原理图右上角「芯片电量检测」用 R3/R4 各 100 K 分压、C6 滤波，把电池电压送进 **IO2**。
+
+所以：
+- 这块板**不能**选 Freenove 板型（它把 I²C 配到 IO1/IO2，会与分压电路打架）
+- IO2 不要拿去做别的用途，悬空时也会被分压网络影响
+
+固件目前还没有读取这个电压，属于硬件预留。
+
+**3. 电源**
+
+电池经 **5V3A 充放升压板**输出 5 V，5 V 直接给 WS2812B，再经板上稳压得到 3.3 V 供 MCU 与传感器。
+所以低功耗时的实际功耗还要算上升压板自身的静态损耗，电池端会比芯片端高一些。
+
+## 硬件资料
+
+原始资料（原理图、PCB、器件购买截图）已归档到 [`docs/hardware/`](docs/hardware/)。
+
+### 原理图
+
+<a href="docs/hardware/schematic.png"><img src="docs/hardware/schematic.png" width="880" alt="智能干湿衣架 原理图"></a>
+
+<sub>点击查看原图。包含 ESP32-S3-WROOM-1-N16R8 主控、AHT30 温湿度、TFT 7 pin 接口、WS2812B、
+BOOT/唤醒键、芯片电量检测与 5 V 升压电源五部分。</sub>
+
+原理图里有几处对写固件特别有用的信息：
+
+| 区域 | 读出来的结论 |
+|------|-------------|
+| TFT 7 pin 接口 | `SCL=IO21`、`SDA=IO47`、`RES=IO45`、`DC=IO40`、`CS=IO41`、`BLK` **未连接** |
+| AHT30 | `SDA=IO6`、`SCL=IO5`，VIN 接 3V3，对应代码里的默认板型 |
+| BOOT/唤醒/配网 按键 | 按下拉低到 GND，R2 10 K 上拉到 3V3，C5 100 nF 消抖 → 可直接做 `ext0` 深睡唤醒源 |
+| 芯片电量检测 | R3/R4 各 100 K 分压后接到 **IO2**，C6 100 nF 滤波 |
+| RGB2 / WS2812B | `DIN=IO48`，`VDD=5 V` |
+| 串口 | IO43 / IO44（UART0），经 CH343 引出到 JP1 |
+
+### PCB
+
+| 顶层布局 | 底层走线 |
+|:---:|:---:|
+| <a href="docs/hardware/pcb-top.png"><img src="docs/hardware/pcb-top.png" width="330" alt="PCB 顶层"></a> | <a href="docs/hardware/pcb-routing.png"><img src="docs/hardware/pcb-routing.png" width="330" alt="PCB 走线"></a> |
+
+### 主要器件
+
+| 器件 | 实物 | 说明 |
+|------|------|------|
+| **ESP32-S3-WROOM-1-N16R8** | <img src="docs/hardware/module-esp32s3.png" width="230"> | 16 MB Flash + 8 MB Octal PSRAM，双核 240 MHz |
+| **AHT30 温湿度模块** | <img src="docs/hardware/module-aht30.png" width="230"> | I²C 地址 0x38，3.3 V 供电，兼容 AHT10/20 协议 |
+| **2.0 寸 TFT SPI 屏** | <img src="docs/hardware/module-tft-2.0.png" width="230"> | ST7789V 驱动，7 pin 排针，320×240 |
+| **5V3A 锂电充放升压板** | <img src="docs/hardware/module-power-5v3a.png" width="230"> | 单 Type-C 口，内置充放电保护，输出 5 V 给灯珠与 LDO |
 
 ## 界面
 
@@ -180,8 +250,10 @@ idf.py -p COM3 flash monitor
 
 ### 背光很重要
 
-如果 LCD 模块的背光直接接在 3.3 V 上，深睡时屏幕虽然全黑但背光仍亮，实测会多耗十几 mA。
-若背光接到了某个 GPIO，请在 menuconfig 里填写：
+本项目这块板子的 TFT `BLK` 引脚是**悬空**的（见[本板的三个硬件约束](#本板的三个硬件约束)），
+背光直接由模块 VCC 供电，所以深睡时屏幕虽然全黑，背光仍在耗电。
+
+如果希望低功耗真正省电，把 `BLK` 飞线接到空闲 IO（例如 IO19 / IO20），然后在 menuconfig 里填写：
 
 ```
 Dry Rack 干湿衣架 → LCD 背光控制 GPIO → 填你的 IO 号
@@ -237,4 +309,5 @@ idf.py build
 - 只支持 2.4 GHz WiFi（ESP32-S3 硬件限制）
 - 没有 RTC 电池，深睡后时间戳依赖 `uptime`，消息时间以接收端为准
 - 深睡期间 BOOT 键以外的按键无法唤醒（IO38 / IO39 不是 RTC IO）
-- 若 LCD 背光不可控，低功耗收益会明显打折
+- 本板 TFT 的 `BLK` 悬空，背光无法由软件关闭，低功耗时仍会多耗十几 mA（见[硬件约束](#本板的三个硬件约束)）
+- 电池电压检测（IO2）硬件已预留，固件尚未读取

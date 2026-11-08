@@ -20,10 +20,12 @@
 
 ### 引脚
 
+> 完整原理图、PCB 与器件实物图见 [README · 硬件资料](README.md#硬件资料)，原图归档在 [`docs/hardware/`](docs/hardware/)。
+
 板型二选一，在 menuconfig 的 `Dry Rack 干湿衣架 → 硬件板型` 中切换；
 引脚常量分别位于 [`app_config.h`](main/app_config.h)（I²C）和 [`st7789.c`](components/st7789_display/st7789.c)（LCD）。
 
-| 功能 | 原板 (默认) | Freenove 板 |
+| 功能 | 本板（原理图，默认） | Freenove 板 |
 |------|-------------|-------------|
 | I²C SDA | IO6 | IO1 |
 | I²C SCL | IO5 | IO2 |
@@ -32,11 +34,19 @@
 | LCD RST | IO45 | IO45 |
 | LCD DC | IO40 | IO40 |
 | LCD CS | IO41 | IO41 |
-| LCD 背光 | 由 `CONFIG_DRYRACK_LCD_BL_GPIO` 指定，默认 -1（不控制） | |
-| WS2812B | IO48 | IO48 |
+| LCD 背光 BLK | **悬空（背光常亮）**，可用 `CONFIG_DRYRACK_LCD_BL_GPIO` 指定，默认 -1 | — |
+| WS2812B DIN | IO48（VDD 接 5 V） | IO48 |
 | 重启键 | IO38 | IO38 |
 | 开关机键 | IO39 | IO39 |
-| BOOT / 唤醒键 | IO0 | IO0 |
+| BOOT / 唤醒键 | IO0（R2 10 K 上拉 + C5 100 nF） | IO0 |
+| 电池电压检测 | IO2（R3/R4 各 100 K 分压 + C6 100 nF） | — |
+
+**本板的两条硬约束**：
+
+1. **BLK 悬空**：`DISPOFF` 只能让屏幕变黑，背光仍亮，低功耗收益打折。
+   要真正省电需飞线把 BLK 接到空闲 IO（IO19 / IO20），再在 menuconfig 里配置背光 GPIO。
+2. **IO2 已被电量检测占用**：所以本板不能选 Freenove 板型（会与分压电路冲突）；
+   该电压目前固件未使用，属硬件预留。
 
 **Freenove 板避坑**：
 
