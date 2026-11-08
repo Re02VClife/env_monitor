@@ -4,7 +4,7 @@
 联网后把数据推送到 webhook（企业微信 / 钉钉 / 飞书 / Bark / 自建服务），
 并支持低功耗模式——关屏后每 30 分钟自动唤醒采集上报一次，按 BOOT 键随时唤醒。
 
-> 本分支由原「环境监测仪」改造而来：**SGP30 气体传感器已从硬件上拆除**，CO₂ / TVOC 相关功能全部移除，只保留温湿度链路。
+
 
 ![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v6.1%20%7C%20v5.5-blue)
 ![MCU](https://img.shields.io/badge/MCU-ESP32--S3-green)
