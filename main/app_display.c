@@ -1,165 +1,224 @@
 /*
- * app_display.c — 简易仪表盘（直接帧缓冲绘制）
+ * app_display.c — 干湿提醒界面（直接帧缓冲绘制）
  *
- * 横屏 320×240 黑底白字布局:
- * ┌────────────────────────────────────┐
- * │  CO2    888    ppm                │  CO2 大数字
- * ├────────────────────────────────────┤
- * │    温度       │      湿度          │
- * │   25.5 °C    │      65 %          │  温湿度
- * ├────────────────────────────────────┤
- * │ ████████░░░░░  良好               │  CO2 进度条
- * └────────────────────────────────────┘
+ * 横屏 320×240 黑底布局:
+ * ┌────────────────────────────────────┐ y=0
+ * │  干湿提醒                 已联网   │ 标题 + 联网状态
+ * ├────────────────────────────────────┤ y=38
+ * │   温度            湿度             │ 标签
+ * │  25.5 °C          65 %             │ 数值
+ * ├────────────────────────────────────┤ y=122
+ * │ ████████████░░░░     适宜          │ 湿度条 + 干湿状态
+ * ├────────────────────────────────────┤ y=168
+ * │ 露点 12.3°C                        │
+ * │ 绝对湿度 9.8 g/m3                  │
+ * └────────────────────────────────────┘ y=240
  */
 #include "app_display.h"
-#include "app_config.h"
-#include "st7789.h"
-#include "display_assets.h"
-#include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+
 #include <stdio.h>
 #include <string.h>
+
+#include "app_config.h"
+#include "display_assets.h"
+#include "esp_log.h"
+#include "st7789.h"
 
 static const char *TAG = "display";
 
 /* ---- RGB565 颜色 ---- */
-#define RGB565(r,g,b)  (uint16_t)(((r)&0x1F)<<11 | ((g)&0x3F)<<5 | ((b)&0x1F))
+#define RGB565(r, g, b)  (uint16_t)(((r) & 0x1F) << 11 | ((g) & 0x3F) << 5 | ((b) & 0x1F))
 
-#define COLOR_BG        0x0000              /* 纯黑 */
-#define COLOR_WHITE     RGB565(31,63,31)    /* 白色 */
-#define COLOR_GRAY      RGB565(10,20,10)    /* 暗灰 (分隔线等) */
-#define COLOR_GREEN     RGB565(0, 55, 0)    /* CO2 良好 */
-#define COLOR_YELLOW    RGB565(31,60, 0)    /* CO2 一般 */
-#define COLOR_RED       RGB565(30, 0, 0)    /* CO2 差 */
-#define COLOR_BAR_BG    RGB565(4,  8, 4)    /* 进度条背景 */
+#define COLOR_BG        0x0000
+#define COLOR_WHITE     RGB565(31, 63, 31)
+#define COLOR_GRAY      RGB565( 8, 16,  8)
+#define COLOR_DIM       RGB565(14, 28, 14)
+#define COLOR_GREEN     RGB565( 0, 60, 10)
+#define COLOR_CYAN      RGB565( 0, 55, 55)
+#define COLOR_YELLOW    RGB565(31, 48,  0)
+#define COLOR_RED       RGB565(31,  4,  0)
+#define COLOR_BAR_BG    RGB565( 4,  8,  4)
 
-/* ---- 常量 ---- */
-#define LCD_W  320
-#define LCD_H  240
-#define HALF_W 160   /* 左右半栏宽度 */
+/* ---- 版式常量 ---- */
+#define LCD_W        320
+#define LCD_H        240
+#define HALF_W       160
+#define TITLE_BOTTOM 38
+#define MID_LINE     122
+#define STATE_LINE   168
+#define BOTTOM_LINE  172
+
+#define BIG_DIGIT_H  34   /* digit 素材行高 */
+#define SMALL_DIGIT_H 18  /* sdigit 素材行高 */
 
 static uint16_t *fb = NULL;
+
+/* ---- 数字集：0-9 / '.' / '-' ---- */
+static const asset_bitmap_t *digits[12];
+static const asset_bitmap_t *sdigits[12];
+
+static display_net_t s_net = DISPLAY_NET_OFFLINE;
 
 /* ================================================================
  * 绘图原语
  * ================================================================ */
 
-/* 填充矩形 */
 static void fill_rect(int x, int y, int w, int h, uint16_t color)
 {
+    if (fb == NULL) return;
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
     if (x + w > LCD_W) w = LCD_W - x;
     if (y + h > LCD_H) h = LCD_H - y;
     if (w <= 0 || h <= 0) return;
+
     for (int row = 0; row < h; row++) {
         uint16_t *dst = fb + (y + row) * LCD_W + x;
         for (int col = 0; col < w; col++) dst[col] = color;
     }
 }
 
-/* 绘制 4bpp 位图 (alpha 混合到背景) */
+/* 4bpp 位图 alpha 混合绘制 */
 static void draw_bmp(int x, int y, const asset_bitmap_t *bmp, uint16_t fg)
 {
-    if (bmp == NULL || bmp->data == NULL) return;
-    int w = bmp->w, h = bmp->h;
-    if (x + w <= 0 || y + h <= 0 || x >= LCD_W || y >= LCD_H) return;
+    if (fb == NULL || bmp == NULL || bmp->data == NULL) return;
+    if (x + bmp->w <= 0 || y + bmp->h <= 0 || x >= LCD_W || y >= LCD_H) return;
 
+    int w = bmp->w, h = bmp->h;
     int row_bytes = (w + 1) / 2;
+
     for (int row = 0; row < h; row++) {
         int sy = y + row;
         if (sy < 0 || sy >= LCD_H) continue;
         uint16_t *dst = fb + sy * LCD_W + x;
+
         for (int col = 0; col < w; col++) {
             int sx = x + col;
             if (sx < 0 || sx >= LCD_W) continue;
-            int a = (col & 1) ? (bmp->data[row * row_bytes + col/2] & 0x0F)
-                              : (bmp->data[row * row_bytes + col/2] >> 4);
+
+            uint8_t byte = bmp->data[row * row_bytes + col / 2];
+            int a = (col & 1) ? (byte & 0x0F) : (byte >> 4);
             if (a == 0) continue;
             if (a >= 15) { dst[col] = fg; continue; }
 
             uint16_t bg = dst[col];
-            int r = (((fg>>11)&0x1F) * a + ((bg>>11)&0x1F) * (15-a)) / 15;
-            int g = (((fg>>5)&0x3F)  * a + ((bg>>5)&0x3F)  * (15-a)) / 15;
-            int b = (( fg    &0x1F) * a + ( bg    &0x1F) * (15-a)) / 15;
-            dst[col] = (uint16_t)((r<<11)|(g<<5)|b);
+            int r = (((fg >> 11) & 0x1F) * a + ((bg >> 11) & 0x1F) * (15 - a)) / 15;
+            int g = (((fg >>  5) & 0x3F) * a + ((bg >>  5) & 0x3F) * (15 - a)) / 15;
+            int b = (( fg        & 0x1F) * a + ( bg        & 0x1F) * (15 - a)) / 15;
+            dst[col] = (uint16_t)((r << 11) | (g << 5) | b);
         }
     }
 }
 
-/* 以指定位图集绘制数字串，返回像素宽度 */
-static int draw_digits(int x, int y, const char *s, uint16_t color,
+static const asset_bitmap_t *pick_glyph(char c, const asset_bitmap_t **set)
+{
+    if (c >= '0' && c <= '9') return set[c - '0'];
+    if (c == '.') return set[10];
+    if (c == '-') return set[11];
+    return NULL;
+}
+
+/* 绘制数字串，返回像素宽度 */
+static int draw_string(int x, int y, const char *s, uint16_t color,
                        const asset_bitmap_t **set)
 {
-    int start_x = x;
+    int start = x;
     while (*s) {
-        const asset_bitmap_t *bmp = NULL;
-        if (*s >= '0' && *s <= '9') bmp = set[*s - '0'];
-        else if (*s == '.')         bmp = set[10];
-        if (bmp) { draw_bmp(x, y, bmp, color); x += bmp->w + 1; }
+        const asset_bitmap_t *bmp = pick_glyph(*s, set);
+        if (bmp) {
+            draw_bmp(x, y, bmp, color);
+            x += bmp->w + 1;
+        }
         s++;
     }
-    return x - start_x - 1; /* 去掉最后 1px 间距 */
+    return (x - start) > 0 ? (x - start - 1) : 0;
 }
 
-/* 数字 + 单位组合绘制（不重叠） */
-static void draw_value_unit(int x, int y, const char *val,
-                            const asset_bitmap_t *unit_bmp,
-                            uint16_t color, const asset_bitmap_t **digits)
+static int string_width(const char *s, const asset_bitmap_t **set)
 {
-    int vw = draw_digits(x, y, val, color, digits);
-    draw_bmp(x + vw + 6, y, unit_bmp, color); /* 6px 间隙 */
-}
-
-/* ================================================================
- * 数字集
- * ================================================================ */
-static const asset_bitmap_t *digits[11]; /* 0-9 + dot */
-
-static void init_digits(void)
-{
-    digits[0]=BMP(digit_0); digits[1]=BMP(digit_1); digits[2]=BMP(digit_2);
-    digits[3]=BMP(digit_3); digits[4]=BMP(digit_4); digits[5]=BMP(digit_5);
-    digits[6]=BMP(digit_6); digits[7]=BMP(digit_7); digits[8]=BMP(digit_8);
-    digits[9]=BMP(digit_9); digits[10]=BMP(digit_dot);
-}
-
-/* ================================================================
- * 居中绘制
- * ================================================================ */
-static void draw_centered(int cx, int y, const asset_bitmap_t *bmp, uint16_t c)
-{
-    if (bmp) draw_bmp(cx - bmp->w / 2, y, bmp, c);
-}
-
-static void draw_digits_centered(int cx, int y, const char *s,
-                                  uint16_t c, const asset_bitmap_t **set)
-{
-    int tw = 0;
-    for (const char *p = s; *p; p++) {
-        if (*p >= '0' && *p <= '9') tw += set[*p-'0']->w + 1;
-        else if (*p == '.')         tw += set[10]->w + 1;
+    int w = 0;
+    while (*s) {
+        const asset_bitmap_t *bmp = pick_glyph(*s, set);
+        if (bmp) w += bmp->w + 1;
+        s++;
     }
-    if (tw > 0) tw -= 1;
-    draw_digits(cx - tw/2, y, s, c, set);
+    return w > 0 ? w - 1 : 0;
+}
+
+/* 数字 + 单位，水平居中在 cx，返回总宽 */
+static int draw_number_unit(int cx, int y, const char *num,
+                            const asset_bitmap_t *unit,
+                            uint16_t color,
+                            const asset_bitmap_t **set, int digit_h)
+{
+    int num_w = string_width(num, set);
+    int unit_w = (unit != NULL) ? unit->w : 0;
+    int gap = (unit != NULL) ? 6 : 0;
+    int total = num_w + gap + unit_w;
+
+    int x = cx - total / 2;
+    draw_string(x, y, num, color, set);
+
+    if (unit != NULL) {
+        int unit_y = y + digit_h - unit->h;
+        if (unit_y < y) unit_y = y;
+        draw_bmp(x + num_w + gap, unit_y, unit, color);
+    }
+    return total;
 }
 
 /* ================================================================
- * CO2 辅助
+ * 颜色 / 文案映射
  * ================================================================ */
-static uint16_t co2_color(uint16_t co2)
+
+static uint16_t level_color(dry_level_t level)
 {
-    if (co2 < CO2_WARN_THRESHOLD)  return COLOR_GREEN;
-    if (co2 < CO2_ALERT_THRESHOLD) return COLOR_YELLOW;
-    return COLOR_RED;
+    switch (level) {
+    case DRY_LEVEL_DRY:    return COLOR_CYAN;
+    case DRY_LEVEL_NORMAL: return COLOR_GREEN;
+    case DRY_LEVEL_DAMP:   return COLOR_YELLOW;
+    case DRY_LEVEL_WET:    return COLOR_RED;
+    default:               return COLOR_WHITE;
+    }
 }
 
-static const asset_bitmap_t *co2_label_bmp(uint16_t co2)
+static const asset_bitmap_t *level_bmp(dry_level_t level)
 {
-    if (co2 < CO2_WARN_THRESHOLD)  return BMP(label_good);
-    if (co2 < CO2_ALERT_THRESHOLD) return BMP(label_warn);
-    return BMP(label_bad);
+    switch (level) {
+    case DRY_LEVEL_DRY:    return BMP(status_dry);
+    case DRY_LEVEL_NORMAL: return BMP(status_normal);
+    case DRY_LEVEL_DAMP:   return BMP(status_damp);
+    case DRY_LEVEL_WET:    return BMP(status_wet);
+    default:               return BMP(hint_none);
+    }
+}
+
+/* ================================================================
+ * 静态元素
+ * ================================================================ */
+
+static void draw_title_bar(void)
+{
+    fill_rect(0, 0, LCD_W, TITLE_BOTTOM, COLOR_BG);
+
+    const asset_bitmap_t *title = BMP(title);
+    draw_bmp((LCD_W - title->w) / 2, 5, title, COLOR_WHITE);
+
+    fill_rect(0, TITLE_BOTTOM, LCD_W, 1, COLOR_GRAY);
+}
+
+static void draw_static_frame(void)
+{
+    /* 温度 / 湿度 标签 */
+    draw_bmp(HALF_W / 2 - BMP(label_temp)->w / 2, 44, BMP(label_temp), COLOR_DIM);
+    draw_bmp(HALF_W + HALF_W / 2 - BMP(label_humi)->w / 2, 44, BMP(label_humi), COLOR_DIM);
+
+    /* 竖线 */
+    fill_rect(HALF_W, 46, 1, 68, COLOR_GRAY);
+
+    /* 底部两行标签 */
+    draw_bmp(12, 176, BMP(label_dew), COLOR_DIM);
+    draw_bmp(12, 204, BMP(label_abs), COLOR_DIM);
 }
 
 /* ================================================================
@@ -169,123 +228,163 @@ static const asset_bitmap_t *co2_label_bmp(uint16_t co2)
 void app_display_init(void)
 {
     fb = st7789_get_fb();
-    if (fb == NULL) { ESP_LOGE(TAG, "帧缓冲不可用!"); return; }
-    init_digits();
+    if (fb == NULL) {
+        ESP_LOGE(TAG, "帧缓冲不可用，界面将不可用");
+        return;
+    }
+
+    digits[0]  = BMP(digit_0);  digits[1]  = BMP(digit_1);
+    digits[2]  = BMP(digit_2);  digits[3]  = BMP(digit_3);
+    digits[4]  = BMP(digit_4);  digits[5]  = BMP(digit_5);
+    digits[6]  = BMP(digit_6);  digits[7]  = BMP(digit_7);
+    digits[8]  = BMP(digit_8);  digits[9]  = BMP(digit_9);
+    digits[10] = BMP(digit_dot);
+    digits[11] = BMP(digit_minus);
+
+    sdigits[0]  = BMP(sdigit_0);  sdigits[1]  = BMP(sdigit_1);
+    sdigits[2]  = BMP(sdigit_2);  sdigits[3]  = BMP(sdigit_3);
+    sdigits[4]  = BMP(sdigit_4);  sdigits[5]  = BMP(sdigit_5);
+    sdigits[6]  = BMP(sdigit_6);  sdigits[7]  = BMP(sdigit_7);
+    sdigits[8]  = BMP(sdigit_8);  sdigits[9]  = BMP(sdigit_9);
+    sdigits[10] = BMP(sdigit_dot);
+    sdigits[11] = BMP(sdigit_minus);
 
     fill_rect(0, 0, LCD_W, LCD_H, COLOR_BG);
+    draw_title_bar();
+    draw_static_frame();
+    app_display_set_net(DISPLAY_NET_OFFLINE);
+
     st7789_flush();
-    ESP_LOGI(TAG, "仪表盘初始化完成 (黑底白字 横屏320x240)");
+    ESP_LOGI(TAG, "界面初始化完成 (320x240 横屏)");
 }
 
-void app_display_update(float temperature, float humidity,
-                        uint16_t co2_ppm, uint16_t tvoc_ppb)
+void app_display_update(const env_reading_t *reading)
+{
+    if (fb == NULL || reading == NULL) return;
+
+    char buf[16];
+
+    /* 从分隔线到屏幕底部整块重绘 */
+    fill_rect(0, MID_LINE, LCD_W, LCD_H - MID_LINE, COLOR_BG);
+
+    /* 底部两行标签落在重绘区内，每次都要补画 */
+    draw_bmp(12, 176, BMP(label_dew), COLOR_DIM);
+    draw_bmp(12, 204, BMP(label_abs), COLOR_DIM);
+
+    /* ---------- 1. 温度（左半） ---------- */
+    if (reading->valid) {
+        snprintf(buf, sizeof(buf), "%.1f", (double)reading->temperature);
+        draw_number_unit(HALF_W / 2, 72, buf, BMP(label_degc),
+                         COLOR_WHITE, digits, BIG_DIGIT_H);
+    } else {
+        draw_bmp(HALF_W / 2 - BMP(hint_none)->w / 2, 80, BMP(hint_none), COLOR_DIM);
+    }
+
+    /* ---------- 2. 湿度（右半） ---------- */
+    if (reading->valid) {
+        snprintf(buf, sizeof(buf), "%.0f", (double)reading->humidity);
+        draw_number_unit(HALF_W + HALF_W / 2, 72, buf, BMP(label_pct),
+                         COLOR_WHITE, digits, BIG_DIGIT_H);
+    } else {
+        draw_bmp(HALF_W + HALF_W / 2 - BMP(hint_none)->w / 2, 80,
+                 BMP(hint_none), COLOR_DIM);
+    }
+
+    /* ---------- 3. 状态区 ---------- */
+    uint16_t color = reading->valid ? level_color(reading->level) : COLOR_DIM;
+
+    /* 湿度进度条 0~100% → 0~150px */
+    const int bar_x = 16, bar_y = 134, bar_w = 150, bar_h = 16;
+    fill_rect(bar_x, bar_y, bar_w, bar_h, COLOR_BAR_BG);
+
+    int fill_w = 0;
+    if (reading->valid) {
+        float rh = reading->humidity;
+        if (rh < 0.0f) rh = 0.0f;
+        if (rh > 100.0f) rh = 100.0f;
+        fill_w = (int)(rh * (float)bar_w / 100.0f);
+    }
+    if (fill_w > 0) {
+        fill_rect(bar_x, bar_y, fill_w, bar_h, color);
+    }
+
+    /* 干湿状态大字 */
+    if (reading->valid) {
+        const asset_bitmap_t *st = level_bmp(reading->level);
+        draw_bmp(200, 126, st, color);
+    }
+
+    /* 分隔线 */
+    fill_rect(0, STATE_LINE, LCD_W, 1, COLOR_GRAY);
+
+    /* ---------- 4. 底部：露点 / 绝对湿度 ---------- */
+    if (reading->valid) {
+        snprintf(buf, sizeof(buf), "%.1f", (double)reading->dew_point);
+        int w = draw_string(62, 178, buf, COLOR_WHITE, sdigits);
+        draw_bmp(62 + w + 6, 178 + SMALL_DIGIT_H - BMP(label_degc)->h,
+                 BMP(label_degc), COLOR_DIM);
+
+        snprintf(buf, sizeof(buf), "%.1f", (double)reading->abs_humidity);
+        w = draw_string(108, 206, buf, COLOR_WHITE, sdigits);
+        draw_bmp(108 + w + 6, 206 + SMALL_DIGIT_H - BMP(unit_gm3)->h,
+                 BMP(unit_gm3), COLOR_DIM);
+    } else {
+        draw_bmp(62, 178, BMP(hint_none), COLOR_DIM);
+        draw_bmp(108, 206, BMP(hint_none), COLOR_DIM);
+    }
+
+    /* ---------- 5. 低温提示 ---------- */
+    if (reading->valid && reading->cold) {
+        draw_bmp(200, 200, BMP(hint_cold), COLOR_YELLOW);
+    }
+
+    st7789_flush();
+}
+
+void app_display_set_net(display_net_t state)
 {
     if (fb == NULL) return;
 
-    uint16_t c2c = co2_color(co2_ppm); /* CO2 颜色 */
-    char buf[16];
+    s_net = state;
 
-    /* ---- 上半区清除 ---- */
-    fill_rect(0, 0, LCD_W, 160, COLOR_BG);
+    const asset_bitmap_t *bmp;
+    uint16_t color;
 
-    /* ============================================================
-     * 1. CO2 区域 (y: 5 ~ 55)
-     * ============================================================ */
-    draw_bmp(12, 5, BMP(label_co2), COLOR_WHITE);
-
-    /* CO2 数值居中 */
-    snprintf(buf, sizeof(buf), "%d", (int)co2_ppm);
-    draw_digits_centered(LCD_W / 2, 5, buf, c2c, digits);
-
-    /* ppm 标签 — 跟在数字后面 */
-    {
-        /* 计算数字总宽度来找 ppm 位置 */
-        int tw = 0;
-        for (const char *p = buf; *p; p++) {
-            if (*p >= '0' && *p <= '9') tw += digits[*p-'0']->w + 1;
-        }
-        tw -= 1;
-        int num_start = LCD_W / 2 - tw / 2;
-        draw_bmp(num_start + tw + 8, 15, BMP(label_ppm), COLOR_GRAY);
+    switch (state) {
+    case DISPLAY_NET_ONLINE:
+        bmp = BMP(net_online);
+        color = COLOR_GREEN;
+        break;
+    case DISPLAY_NET_PROV:
+        bmp = BMP(net_prov);
+        color = COLOR_YELLOW;
+        break;
+    case DISPLAY_NET_OFFLINE:
+    default:
+        bmp = BMP(net_offline);
+        color = COLOR_RED;
+        break;
     }
 
-    /* ---- 分隔线 ---- */
-    fill_rect(0, 60, LCD_W, 1, COLOR_GRAY);
+    int x = LCD_W - 10 - bmp->w;
+    fill_rect(230, 4, LCD_W - 230, TITLE_BOTTOM - 4, COLOR_BG);
+    draw_bmp(x, 10, bmp, color);
 
-    /* ============================================================
-     * 2. 温度 + 湿度 (左右半栏, y: 65 ~ 145)
-     *    标签在上，数值+单位在下，彻底避免重叠
-     * ============================================================ */
+    st7789_flush();
+}
 
-    /* ---- 左栏: 温度 ---- */
-    draw_centered(HALF_W / 2, 72, BMP(label_temp), COLOR_WHITE);
+void app_display_off(void)
+{
+    if (fb == NULL) return;
+    st7789_display_off();
+}
 
-    snprintf(buf, sizeof(buf), "%.1f", (double)temperature);
-    {
-        int tw = 0;
-        for (const char *p = buf; *p; p++) {
-            if (*p >= '0' && *p <= '9') tw += digits[*p-'0']->w + 1;
-            else if (*p == '.')         tw += digits[10]->w + 1;
-        }
-        tw -= 1;
-        int unit_w = BMP(label_degc)->w;
-        int total_w = tw + 6 + unit_w; /* 数字 + 6px间距 + 单位 */
-        int num_x = (HALF_W - total_w) / 2;
-        /* 数值垂直: 标签(26px高)在72, 数值在72+26+8=106 */
-        draw_value_unit(num_x, 106, buf, BMP(label_degc), COLOR_WHITE, digits);
-    }
-
-    /* ---- 右栏: 湿度 ---- */
-    draw_centered(HALF_W + HALF_W / 2, 72, BMP(label_humi), COLOR_WHITE);
-
-    snprintf(buf, sizeof(buf), "%.0f", (double)humidity);
-    {
-        int tw = 0;
-        for (const char *p = buf; *p; p++) {
-            if (*p >= '0' && *p <= '9') tw += digits[*p-'0']->w + 1;
-        }
-        tw -= 1;
-        int unit_w = BMP(label_pct)->w;
-        int total_w = tw + 6 + unit_w;
-        int num_x = HALF_W + (HALF_W - total_w) / 2;
-        draw_value_unit(num_x, 106, buf, BMP(label_pct), COLOR_WHITE, digits);
-    }
-
-    /* ---- 中部分隔线 ---- */
-    fill_rect(HALF_W, 75, 1, 60, COLOR_GRAY);
-
-    /* ---- 下部分隔线 ---- */
-    fill_rect(0, 152, LCD_W, 1, COLOR_GRAY);
-
-    /* ============================================================
-     * 3. CO2 进度条 (y: 160 ~ 185)
-     * ============================================================ */
-    fill_rect(0, 155, LCD_W, 45, COLOR_BG);
-
-    /* 条背景 */
-    fill_rect(10, 160, LCD_W - 20, 16, COLOR_BAR_BG);
-
-    /* 条前景 (400-2000 → 0..300) */
-    int bw = (int)((int32_t)(co2_ppm - 400) * (LCD_W - 20) / 1600);
-    if (bw < 0) bw = 0;
-    if (bw > LCD_W - 20) bw = LCD_W - 20;
-    fill_rect(10, 160, bw, 16, c2c);
-
-    /* 状态标签 */
-    draw_bmp(10, 180, co2_label_bmp(co2_ppm), c2c);
-
-    /* ---- 底部分隔线 ---- */
-    fill_rect(0, 200, LCD_W, 1, COLOR_GRAY);
-
-    /* ============================================================
-     * 4. TVOC 信息 (y: 205 ~ 235)
-     * ============================================================ */
-    fill_rect(0, 203, LCD_W, 37, COLOR_BG);
-    snprintf(buf, sizeof(buf), "TVOC: %d ppb", (int)tvoc_ppb);
-    /* 简单文本: 用数字位图绘制 TVOC 数值 */
-    /* "TVOC:" 无位图，先跳过；仅用数字绘制 ppb 值作为信息展示 */
-    /* TODO: 后续可添加 ASCII 字体 */
-
-    /* ---- 刷新 ---- */
+void app_display_on(void)
+{
+    if (fb == NULL) return;
+    st7789_display_on();
+    draw_title_bar();
+    draw_static_frame();
+    app_display_set_net(s_net);
     st7789_flush();
 }

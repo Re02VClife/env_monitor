@@ -1,3 +1,0 @@
-dependencies:
-  lvgl/lvgl:
-    version: "^9.0"
