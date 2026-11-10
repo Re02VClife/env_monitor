@@ -16,6 +16,7 @@
 
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -73,6 +74,227 @@ static void derive_metrics(env_reading_t *r)
     }
 
     r->cold = (t < COLD_TEMP_C);
+}
+
+/* ----------------------------------------------------------------
+ * 预计干衣时间
+ *
+ * 衣物水分蒸发速率与「剩余含水量 × 蒸发驱动力」成正比，所以在环境
+ * 基本稳定的条件下，晾晒过程中环境相对湿度会按指数衰减：
+ *
+ *     RH(t) = RH_floor + A · e^(-k·t)
+ *
+ * 两条估算路径：
+ *   1. 有足够历史（≥10 点）且湿度确实在下降
+ *      → 对 ln(RH - RH_floor) 做最小二乘拟合求 k，再外推到目标湿度
+ *   2. 历史不足（刚上电 / 低功耗刚唤醒 / 湿度还没开始降）
+ *      → 用饱和水汽压差 VPD 做物理估算，干燥时间近似反比于 VPD
+ *
+ * VPD = es(T) · (1 - RH/100)，单位 hPa
+ * 经验常数按「25°C / 50%RH 约 6.5 小时」标定。
+ * ---------------------------------------------------------------- */
+
+#define ETA_HIST_SIZE           96                        /* 历史缓冲点数 */
+#define ETA_SAMPLE_INTERVAL_MS  (60 * 1000)               /* 每 60 秒记一点 */
+#define ETA_MIN_FIT_POINTS      10                        /* 拟合最少点数 */
+#define ETA_BASE_MARGIN         5.0f                      /* 环境基线往下留的余量 */
+#define ETA_GOAL_MARGIN         2.0f                      /* 判定「已干」的余量 */
+#define ETA_VPD_K               103.0f                    /* t(h) = K / VPD(hPa) */
+#define ETA_MAX_MIN             (48 * 60)                 /* 超过 48 小时就不报 */
+#define ETA_RISE_RESET          6.0f                      /* 湿度突升多少算「刚挂衣服」 */
+
+typedef struct {
+    int64_t ts_ms;
+    float   rh;
+    float   temp;
+} eta_point_t;
+
+static eta_point_t s_hist[ETA_HIST_SIZE];
+static int     s_hist_count   = 0;
+static int     s_hist_head    = 0;
+static int64_t s_hist_last_ms = 0;
+static bool    s_eta_dirty    = true;
+static int     s_eta_cached   = -1;
+static bool    s_eta_by_trend = false;
+
+/* 取历史中第 i 个点（0 为最旧） */
+static const eta_point_t *eta_at(int i)
+{
+    if (i < 0 || i >= s_hist_count) {
+        return NULL;
+    }
+    int idx = (s_hist_head - s_hist_count + i) % ETA_HIST_SIZE;
+    if (idx < 0) {
+        idx += ETA_HIST_SIZE;
+    }
+    return &s_hist[idx];
+}
+
+static void eta_record(float rh, float temp)
+{
+    int64_t now_ms = esp_timer_get_time() / 1000;
+
+    if (s_hist_count > 0 && (now_ms - s_hist_last_ms) < ETA_SAMPLE_INTERVAL_MS) {
+        return;
+    }
+
+    /* 湿度突然大幅上升，多半是刚挂上湿衣服：丢掉旧曲线重新记录 */
+    if (s_hist_count > 0) {
+        const eta_point_t *prev = eta_at(s_hist_count - 1);
+        if (prev != NULL && (rh - prev->rh) > ETA_RISE_RESET) {
+            ESP_LOGI(TAG, "湿度突升 %.1f→%.1f%%，判定为挂衣，重置干衣预测",
+                     prev->rh, rh);
+            s_hist_count = 0;
+            s_hist_head  = 0;
+        }
+    }
+
+    s_hist[s_hist_head].ts_ms = now_ms;
+    s_hist[s_hist_head].rh    = rh;
+    s_hist[s_hist_head].temp  = temp;
+
+    s_hist_head = (s_hist_head + 1) % ETA_HIST_SIZE;
+    if (s_hist_count < ETA_HIST_SIZE) {
+        s_hist_count++;
+    }
+
+    s_hist_last_ms = now_ms;
+    s_eta_dirty    = true;
+}
+
+/* 对 ln(RH - floor) 做最小二乘，返回衰减常数 k（1/小时） */
+static bool eta_fit_decay(float floor_rh, float *k_out)
+{
+    if (s_hist_count < ETA_MIN_FIT_POINTS) {
+        return false;
+    }
+
+    const eta_point_t *first = eta_at(0);
+    if (first == NULL) {
+        return false;
+    }
+
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
+    int    n = 0;
+
+    for (int i = 0; i < s_hist_count; i++) {
+        const eta_point_t *p = eta_at(i);
+        if (p == NULL) {
+            continue;
+        }
+
+        float y = p->rh - floor_rh;
+        if (y <= 0.8f) {
+            continue;   /* 太贴近基线，取对数没有意义 */
+        }
+
+        double t  = (double)(p->ts_ms - first->ts_ms) / 3600000.0;   /* 小时 */
+        double ly = log((double)y);
+
+        sx  += t;
+        sy  += ly;
+        sxx += t * t;
+        sxy += t * ly;
+        n++;
+    }
+
+    if (n < ETA_MIN_FIT_POINTS) {
+        return false;
+    }
+
+    double den = (double)n * sxx - sx * sx;
+    if (fabs(den) < 1e-9) {
+        return false;
+    }
+
+    double slope = ((double)n * sxy - sx * sy) / den;
+
+    /* 斜率必须明显为负，才算真的在指数下降 */
+    if (slope > -1e-4) {
+        return false;
+    }
+
+    *k_out = (float)(-slope);
+    return true;
+}
+
+/* 返回预计剩余分钟数，<0 表示无法估算 */
+static int eta_estimate(float rh, float temp, bool *by_trend)
+{
+    *by_trend = false;
+
+    /* ---- 1. 历史最低湿度作为环境基线 ---- */
+    float rh_min = rh;
+    for (int i = 0; i < s_hist_count; i++) {
+        const eta_point_t *p = eta_at(i);
+        if (p != NULL && p->rh < rh_min) {
+            rh_min = p->rh;
+        }
+    }
+
+    float floor_rh = rh_min - ETA_BASE_MARGIN;
+    if (floor_rh < 10.0f) {
+        floor_rh = 10.0f;
+    }
+
+    /* ---- 2. 指数衰减外推 ---- */
+    float k = 0.0f;
+    if (eta_fit_decay(floor_rh, &k) && k > 0.0f) {
+        float goal_rh = rh_min + ETA_GOAL_MARGIN;
+        float cur = rh - floor_rh;
+        float tgt = goal_rh - floor_rh;
+
+        if (tgt <= 0.5f) {
+            tgt = 0.5f;
+        }
+        if (cur <= tgt) {
+            return 0;   /* 已经回到基线，按「干了」算 */
+        }
+
+        float hours = logf(cur / tgt) / k;
+        if (hours >= 0.0f && hours <= (float)ETA_MAX_MIN / 60.0f) {
+            *by_trend = true;
+            return (int)(hours * 60.0f);
+        }
+    }
+
+    /* ---- 3. VPD 物理兜底 ---- */
+    const float es = 6.112f * expf(17.67f * temp / (temp + 243.5f));
+    float vpd = es * (1.0f - rh / 100.0f);
+    if (vpd < 0.5f) {
+        vpd = 0.5f;
+    }
+
+    float hours = ETA_VPD_K / vpd;
+    if (hours > (float)ETA_MAX_MIN / 60.0f) {
+        return -1;
+    }
+
+    return (int)(hours * 60.0f);
+}
+
+static void eta_update(float rh, float temp, env_reading_t *out)
+{
+    eta_record(rh, temp);
+
+    if (s_eta_dirty) {
+        s_eta_cached   = eta_estimate(rh, temp, &s_eta_by_trend);
+        s_eta_dirty    = false;
+    }
+
+    out->eta_min      = s_eta_cached;
+    out->eta_by_trend = s_eta_by_trend;
+}
+
+void app_core_eta_reset(void)
+{
+    s_hist_count   = 0;
+    s_hist_head    = 0;
+    s_hist_last_ms = 0;
+    s_eta_dirty    = true;
+    s_eta_cached   = -1;
+    s_eta_by_trend = false;
+    ESP_LOGI(TAG, "干衣时间历史已重置");
 }
 
 /* ----------------------------------------------------------------
@@ -141,6 +363,7 @@ esp_err_t app_core_read(env_reading_t *out)
     out->temperature = raw.temperature;
     out->humidity    = raw.humidity;
     derive_metrics(out);
+    eta_update(out->humidity, out->temperature, out);
     out->valid = true;
 
     portENTER_CRITICAL(&s_last_lock);
@@ -180,6 +403,7 @@ esp_err_t app_core_read_average(env_reading_t *out, int samples, int gap_ms)
     out->temperature = t_sum / (float)ok_cnt;
     out->humidity    = h_sum / (float)ok_cnt;
     derive_metrics(out);
+    eta_update(out->humidity, out->temperature, out);
     out->valid = true;
 
     portENTER_CRITICAL(&s_last_lock);

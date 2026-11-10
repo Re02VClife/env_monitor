@@ -55,6 +55,8 @@ static char s_ap_ssid[33] = { 0 };
  * 小工具
  * ================================================================ */
 
+static void fmt_eta(const env_reading_t *r, char *out, size_t out_size);
+
 static const char *device_id(void)
 {
     static char id[8] = { 0 };
@@ -476,9 +478,16 @@ static const char PAGE_PROV_HEAD[] =
 
 static esp_err_t handler_root(httpd_req_t *req)
 {
-    static char html[2048];
+    static char html[2304];
     env_reading_t r = { 0 };
     bool ok = app_core_get_last(&r);
+
+    char eta_text[40];
+    if (ok) {
+        fmt_eta(&r, eta_text, sizeof(eta_text));
+    } else {
+        strlcpy(eta_text, "--", sizeof(eta_text));
+    }
 
     if (s_state == APP_WIFI_AP_PROV) {
         httpd_resp_set_type(req, "text/html; charset=utf-8");
@@ -496,9 +505,9 @@ static esp_err_t handler_root(httpd_req_t *req)
         ".card{background:#fff;border-radius:14px;padding:18px;box-shadow:0 1px 6px #0001}"
         ".big{font-size:40px;font-weight:600;letter-spacing:-1px}"
         ".unit{font-size:18px;color:#8a8f98;margin-left:4px}"
-        ".row{display:flex;gap:12px;margin-top:14px}"
+        ".row{display:flex;gap:10px;margin-top:14px}"
         ".row div{flex:1;background:#fff;border-radius:14px;padding:14px;box-shadow:0 1px 6px #0001}"
-        ".k{font-size:12px;color:#8a8f98}.v{font-size:20px;font-weight:600;margin-top:4px}"
+        ".k{font-size:12px;color:#8a8f98}.v{font-size:17px;font-weight:600;margin-top:4px}"
         "</style></head><body>"
         "<h2>智能干湿衣架 <span style='float:right;font-size:13px;color:#2f6fed'>%s</span></h2>"
         "<div class='card'><div class='big'>%.1f<span class='unit'>°C</span> "
@@ -506,6 +515,7 @@ static esp_err_t handler_root(httpd_req_t *req)
         "<div class='k' style='margin-top:8px'>%s · 露点 %.1f°C · 绝对湿度 %.1f g/m3</div></div>"
         "<div class='row'>"
         "<div><div class='k'>干湿状态</div><div class='v'>%s</div></div>"
+        "<div><div class='k'>预计干衣</div><div class='v'>%s</div></div>"
         "<div><div class='k'>联网</div><div class='v'>%s</div></div>"
         "</div>"
         "<p style='font-size:12px;color:#8a8f98;margin-top:16px'>"
@@ -519,6 +529,7 @@ static esp_err_t handler_root(httpd_req_t *req)
         ok ? r.dew_point : 0.0f,
         ok ? r.abs_humidity : 0.0f,
         ok ? dry_level_text(r.level) : "--",
+        eta_text,
         app_wifi_state_text());
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
@@ -535,10 +546,14 @@ static esp_err_t handler_status(httpd_req_t *req)
         snprintf(json, sizeof(json),
             "{\"device\":\"dryrack\",\"id\":\"%s\",\"valid\":true,"
             "\"temp\":%.1f,\"humi\":%.0f,\"level\":\"%s\",\"status\":\"%s\","
-            "\"dew\":%.1f,\"ah\":%.1f,\"cold\":%s,\"wifi\":\"%s\"}",
+            "\"dew\":%.1f,\"ah\":%.1f,"
+            "\"eta_min\":%d,\"eta_src\":\"%s\","
+            "\"cold\":%s,\"wifi\":\"%s\"}",
             device_id(), r.temperature, r.humidity,
             dry_level_code(r.level), dry_level_text(r.level),
             r.dew_point, r.abs_humidity,
+            r.eta_min,
+            (r.eta_min < 0) ? "none" : (r.eta_by_trend ? "trend" : "vpd"),
             r.cold ? "true" : "false",
             app_wifi_state_text());
     } else {
@@ -665,24 +680,45 @@ static void build_json(const env_reading_t *r, char *out, size_t out_size)
         "{\"device\":\"dryrack\",\"id\":\"%s\","
         "\"temp\":%.1f,\"humi\":%.0f,"
         "\"level\":\"%s\",\"status\":\"%s\","
-        "\"dew\":%.1f,\"ah\":%.1f,\"cold\":%s,"
-        "\"uptime\":%u}",
+        "\"dew\":%.1f,\"ah\":%.1f,"
+        "\"eta_min\":%d,\"eta_src\":\"%s\","
+        "\"cold\":%s,\"uptime\":%u}",
         device_id(),
         r->temperature, r->humidity,
         dry_level_code(r->level), dry_level_text(r->level),
         r->dew_point, r->abs_humidity,
+        r->eta_min,
+        (r->eta_min < 0) ? "none" : (r->eta_by_trend ? "trend" : "vpd"),
         r->cold ? "true" : "false",
         (unsigned)(esp_timer_get_time() / 1000000LL));
 }
 
+/* 「约 3.5 小时」/「约 45 分钟」/「暂时无法估算」 */
+static void fmt_eta(const env_reading_t *r, char *out, size_t out_size)
+{
+    if (r->eta_min < 0) {
+        strlcpy(out, "暂时无法估算", out_size);
+    } else if (r->eta_min < 60) {
+        snprintf(out, out_size, "约 %d 分钟", r->eta_min);
+    } else if (r->eta_min < 600) {
+        snprintf(out, out_size, "约 %.1f 小时", (double)r->eta_min / 60.0);
+    } else {
+        snprintf(out, out_size, "约 %.0f 小时", (double)r->eta_min / 60.0);
+    }
+}
+
 static void build_message(const env_reading_t *r, char *out, size_t out_size)
 {
+    char eta[32];
+    fmt_eta(r, eta, sizeof(eta));
+
     snprintf(out, out_size,
-        "【干湿衣架 %s】%s\n温度 %.1f°C，湿度 %.0f%%\n露点 %.1f°C，绝对湿度 %.1f g/m3%s",
+        "【干湿衣架 %s】%s\n温度 %.1f°C，湿度 %.0f%%\n露点 %.1f°C，绝对湿度 %.1f g/m3\n预计干衣：%s%s",
         device_id(),
         dry_level_text(r->level),
         r->temperature, r->humidity,
         r->dew_point, r->abs_humidity,
+        eta,
         r->cold ? "\n⚠ 低温，衣物干得慢" : "");
 }
 
@@ -770,7 +806,7 @@ esp_err_t app_wifi_report(const env_reading_t *reading)
     nvs_load_u8(NVS_KEY_WEBHOOK_FMT, &fmt, 0);
 
     char payload[WEBHOOK_BODY_MAX];
-    char msg[256];
+    char msg[320];
 
     switch (fmt) {
     case WEBHOOK_FMT_TEXT:

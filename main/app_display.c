@@ -44,9 +44,8 @@ static const char *TAG = "display";
 #define LCD_H        240
 #define HALF_W       160
 #define TITLE_BOTTOM 38
-#define MID_LINE     122
-#define STATE_LINE   168
-#define BOTTOM_LINE  172
+#define CONTENT_TOP  42   /* 标题栏以下的内容区起点：数字与标签都在这里，必须整块擦 */
+#define STATE_LINE   172
 
 #define BIG_DIGIT_H  34   /* digit 素材行高 */
 #define SMALL_DIGIT_H 18  /* sdigit 素材行高 */
@@ -118,15 +117,28 @@ static const asset_bitmap_t *pick_glyph(char c, const asset_bitmap_t **set)
     return NULL;
 }
 
-/* 绘制数字串，返回像素宽度 */
+/* 绘制数字串，返回像素宽度
+ *
+ * 字符默认顶部对齐，但两种符号要特殊处理：
+ *   - 小数点素材只有 6px（大号）/ 3px（小号）高，必须落到基线，否则会飘在数字顶端
+ *   - 负号较矮，垂直居中才不会变成下标
+ */
 static int draw_string(int x, int y, const char *s, uint16_t color,
                        const asset_bitmap_t **set)
 {
+    const int base_h = set[0]->h;   /* 以数字 0 的高度为基准 */
     int start = x;
+
     while (*s) {
         const asset_bitmap_t *bmp = pick_glyph(*s, set);
         if (bmp) {
-            draw_bmp(x, y, bmp, color);
+            int dy = 0;
+            if (*s == '.') {
+                dy = base_h - bmp->h;         /* 小数点底部对齐 */
+            } else if (*s == '-') {
+                dy = (base_h - bmp->h) / 2;   /* 负号垂直居中 */
+            }
+            draw_bmp(x, y + dy, bmp, color);
             x += bmp->w + 1;
         }
         s++;
@@ -207,18 +219,51 @@ static void draw_title_bar(void)
     fill_rect(0, TITLE_BOTTOM, LCD_W, 1, COLOR_GRAY);
 }
 
-static void draw_static_frame(void)
+/* 温度/湿度标签、分栏竖线、底部两行标签
+ * 这些元素都落在内容区里，每次整块重绘后必须补画 */
+static void draw_labels(void)
 {
-    /* 温度 / 湿度 标签 */
     draw_bmp(HALF_W / 2 - BMP(label_temp)->w / 2, 44, BMP(label_temp), COLOR_DIM);
     draw_bmp(HALF_W + HALF_W / 2 - BMP(label_humi)->w / 2, 44, BMP(label_humi), COLOR_DIM);
 
-    /* 竖线 */
+    /* 左右分栏竖线 */
     fill_rect(HALF_W, 46, 1, 68, COLOR_GRAY);
 
     /* 底部两行标签 */
     draw_bmp(12, 176, BMP(label_dew), COLOR_DIM);
     draw_bmp(12, 204, BMP(label_abs), COLOR_DIM);
+}
+
+/* 预计干衣时间：一行「预计 X.X 小时」/「预计 NN 分钟」 */
+static void draw_eta(const env_reading_t *r)
+{
+    const int y_base = 169;   /* 这一行按底部对齐 */
+
+    if (r == NULL || !r->valid || r->eta_min < 0) {
+        draw_bmp(16, y_base - BMP(hint_none)->h, BMP(hint_none), COLOR_DIM);
+        return;
+    }
+
+    char num[12];
+    const asset_bitmap_t *unit;
+
+    if (r->eta_min < 60) {
+        snprintf(num, sizeof(num), "%d", r->eta_min);
+        unit = BMP(unit_min);
+    } else {
+        float hours = (float)r->eta_min / 60.0f;
+        snprintf(num, sizeof(num), (hours < 10.0f) ? "%.1f" : "%.0f", (double)hours);
+        unit = BMP(unit_hour);
+    }
+
+    int x = 16;
+    draw_bmp(x, y_base - BMP(label_eta)->h, BMP(label_eta), COLOR_DIM);
+    x += BMP(label_eta)->w + 6;
+
+    int w = draw_string(x, y_base - SMALL_DIGIT_H, num, COLOR_WHITE, sdigits);
+    x += w + 6;
+
+    draw_bmp(x, y_base - unit->h, unit, COLOR_DIM);
 }
 
 /* ================================================================
@@ -251,7 +296,7 @@ void app_display_init(void)
 
     fill_rect(0, 0, LCD_W, LCD_H, COLOR_BG);
     draw_title_bar();
-    draw_static_frame();
+    draw_labels();
     app_display_set_net(DISPLAY_NET_OFFLINE);
 
     st7789_flush();
@@ -264,12 +309,12 @@ void app_display_update(const env_reading_t *reading)
 
     char buf[16];
 
-    /* 从分隔线到屏幕底部整块重绘 */
-    fill_rect(0, MID_LINE, LCD_W, LCD_H - MID_LINE, COLOR_BG);
+    /* 从标题栏下方整块重绘：
+     * 温度/湿度数字（y=72）和底部信息都在这个区间里，不一起擦就会叠字 */
+    fill_rect(0, CONTENT_TOP, LCD_W, LCD_H - CONTENT_TOP, COLOR_BG);
 
-    /* 底部两行标签落在重绘区内，每次都要补画 */
-    draw_bmp(12, 176, BMP(label_dew), COLOR_DIM);
-    draw_bmp(12, 204, BMP(label_abs), COLOR_DIM);
+    /* 标签与竖线刚被擦掉，补回来 */
+    draw_labels();
 
     /* ---------- 1. 温度（左半） ---------- */
     if (reading->valid) {
@@ -294,7 +339,7 @@ void app_display_update(const env_reading_t *reading)
     uint16_t color = reading->valid ? level_color(reading->level) : COLOR_DIM;
 
     /* 湿度进度条 0~100% → 0~150px */
-    const int bar_x = 16, bar_y = 134, bar_w = 150, bar_h = 16;
+    const int bar_x = 16, bar_y = 124, bar_w = 150, bar_h = 16;
     fill_rect(bar_x, bar_y, bar_w, bar_h, COLOR_BAR_BG);
 
     int fill_w = 0;
@@ -311,8 +356,11 @@ void app_display_update(const env_reading_t *reading)
     /* 干湿状态大字 */
     if (reading->valid) {
         const asset_bitmap_t *st = level_bmp(reading->level);
-        draw_bmp(200, 126, st, color);
+        draw_bmp(200, 114, st, color);
     }
+
+    /* 预计干衣时间（进度条下方） */
+    draw_eta(reading);
 
     /* 分隔线 */
     fill_rect(0, STATE_LINE, LCD_W, 1, COLOR_GRAY);
@@ -384,7 +432,7 @@ void app_display_on(void)
     if (fb == NULL) return;
     st7789_display_on();
     draw_title_bar();
-    draw_static_frame();
+    draw_labels();
     app_display_set_net(s_net);
     st7789_flush();
 }

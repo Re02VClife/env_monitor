@@ -30,8 +30,10 @@ typedef struct {
     float abs_humidity;   /* 绝对湿度 (g/m³) */
     float dew_point;      /* 露点温度 (°C) */
     dry_level_t level;    /* 干湿等级 */
-    bool cold;            /* 低温环境（蒸发慢） */
-    bool valid;           /* 数据是否有效 */
+    int   eta_min;        /* 预计干衣剩余时间（分钟），<0 表示暂时无法估算 */
+    bool  eta_by_trend;   /* true=按湿度衰减趋势外推；false=按 VPD 物理模型 */
+    bool  cold;           /* 低温环境（蒸发慢） */
+    bool  valid;          /* 数据是否有效 */
 } env_reading_t;
 
 /**
@@ -72,6 +74,13 @@ const char *dry_level_text(dry_level_t level);
  * @brief 干湿等级的英文短码（dry / normal / damp / wet），用于 JSON
  */
 const char *dry_level_code(dry_level_t level);
+
+/**
+ * @brief 重置干衣时间估算的历史数据
+ *
+ * 挂上新衣服（湿度开始上升）时调用，避免旧曲线干扰预测。
+ */
+void app_core_eta_reset(void);
 
 /**
  * @brief 按干湿等级设置 WS2812B 颜色
