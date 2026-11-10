@@ -140,6 +140,26 @@ BOOT/唤醒键、芯片电量检测与 5 V 升压电源五部分。</sub>
 └────────────────────────────────────┘
 ```
 
+### 实拍
+
+演示视频（56 秒）里的三个关键画面，正好覆盖完整的晾晒过程：
+
+<table>
+<tr>
+<td align="center"><img src="docs/screenshots/shot-01-initial.jpg" width="320"></td>
+<td align="center"><img src="docs/screenshots/shot-02-rising.jpg" width="320"></td>
+<td align="center"><img src="docs/screenshots/shot-04-dry.jpg" width="320"></td>
+</tr>
+<tr>
+<td align="center"><b>初始 25.2°C / 36%</b><br>判定「干燥」，预计 5.0 小时</td>
+<td align="center"><b>挂上湿毛巾后 79%</b><br>越过阈值，状态切为「潮湿」</td>
+<td align="center"><b>水分蒸发后 11%</b><br>回到「干燥」，预计 4.3 小时</td>
+</tr>
+</table>
+
+> 中间湿度峰值一度冲到 90% 以上（接近 AHT30 满量程），随后随毛巾失水回落。
+> 全程由固件自动判定等级、切换配色、重算干衣时间，无需人工干预。
+
 ### 干湿判定规则
 
 按相对湿度分档（阈值可在 [`app_config.h`](main/app_config.h) 调整）：
@@ -329,6 +349,9 @@ env_monitor/
 │   ├── ws2812_led/         # WS2812B 驱动（原生 RMT，无外部依赖）
 │   ├── display_assets/     # 预渲染 4bpp 位图字体（自动生成）
 │   └── nvs_storage/        # NVS 键值存储
+├── docs/
+│   ├── hardware/           # 原理图、PCB、器件实物图
+│   └── screenshots/        # 实拍界面截图
 ├── generate_display_assets.py  # 位图素材生成脚本
 ├── sdkconfig.defaults          # Kconfig 默认值
 ├── partitions.csv              # 分区表
