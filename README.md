@@ -351,7 +351,8 @@ env_monitor/
 │   └── nvs_storage/        # NVS 键值存储
 ├── docs/
 │   ├── hardware/           # 原理图、PCB、器件实物图
-│   └── screenshots/        # 实拍界面截图
+│   ├── screenshots/        # 实拍界面截图
+│   └── 项目总结与心得.md    # 改造过程、踩坑记录与方法论反思
 ├── generate_display_assets.py  # 位图素材生成脚本
 ├── sdkconfig.defaults          # Kconfig 默认值
 ├── partitions.csv              # 分区表
