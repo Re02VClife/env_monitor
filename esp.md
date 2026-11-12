@@ -1,221 +1,301 @@
-# 环境监测仪 — 项目文档
+# 智能干湿提醒衣架 — 设计文档
 
-> 最后更新: 2026-06-15 — 显示重构：去除 LVGL，改为直驱帧缓冲横屏仪表盘
+> 最后更新: 2026-11-08 — 由「环境监测仪」改造：拆除 SGP30，新增 WiFi 上报、手机配网、低功耗周期采集
 
 ---
 
-## 一、硬件规格
+## 一、硬件
 
-### 元件清单 (BOM)
+### BOM
 
-| 位号 | 型号/名称 | 描述 |
-|-|-|-|
-| **U3** | ESP32-S3-WROOM-1-N16R8 | 主控MCU，Wi-Fi+蓝牙模组，Octal PSRAM 8MB |
-| **U9** | 5V升压板 | 电源模块，电池升压至5V |
-| **U4** | WAFER-PH2.0-2PZZ | 2Pin 2.0mm 电池/电源连接器 |
-| **U7** | ST7789**V** | LCD显示屏（SPI接口）**注意是V版本** |
-| **U1** | SGP30 | 气体传感器（CO₂/TVOC）I²C接口 |
-| **U2** | AHT30 | 温湿度传感器，I²C接口 |
-| **RGB1** | XL-5050RGBC-WS2812B | 5050幻彩LED，内置WS2812B驱动 |
-
-### 引脚映射
-
-> 切换板子时修改 [`app_config.h`](main/app_config.h) 和 [`st7789.c`](components/st7789_display/st7789.c) 顶部的宏定义。
-
-#### 当前板：Freenove ESP32-S3 WROOM（单 I²C 总线）
-
-| 功能 | 引脚 | 说明 |
+| 位号 | 型号 | 说明 |
 |------|------|------|
-| I²C 总线 | SDA=**IO1**, SCL=**IO2** | AHT30(0x38) + SGP30(0x58) 共用 |
-| ST7789V SPI | SCK=IO21, SDA=**IO42**, RST=IO45, DC=IO40, CS=IO41 | IO42 避开 PSRAM IO47 |
-| WS2812B | IO48 | ⚠️ Octal PSRAM 共用，可能不稳定 |
-| UART 调试 | TX=IO37, RX=IO36 | |
+| U3 | ESP32-S3-WROOM-1-N16R8 | 主控，Wi-Fi + BLE，Octal PSRAM 8MB |
+| U9 | 5V 升压板 | 电池升压 |
+| U4 | WAFER-PH2.0-2PZZ | 电池/电源连接器 |
+| U7 | ST7789**V** | LCD 显示屏（SPI，注意是 V 版本） |
+| U2 | AHT30 | 温湿度传感器（I²C 0x38） |
+| RGB1 | XL-5050RGBC-WS2812B | 幻彩 LED |
+| ~~U1~~ | ~~SGP30~~ | **已拆除**，原 CO₂/TVOC 传感器 |
 
-#### 旧板：原 ESP32-S3-WROOM-1 开发板（双 I²C 总线）
+### 引脚
 
-| 功能 | 引脚 | 说明 |
-|------|------|------|
-| AHT30 I2C | SDA=**IO6**, SCL=**IO5** | |
-| SGP30 I2C | SDA=IO20, SCL=IO19 | |
-| ST7789V SPI | SCK=IO21, SDA=**IO47**, RST=IO45, DC=IO40, CS=IO41 | |
-| WS2812B | IO48 | |
-| UART 调试 | TX=IO37, RX=IO36 | |
+> 完整原理图、PCB 与器件实物图见 [README · 硬件资料](README.md#硬件资料)，原图归档在 [`docs/hardware/`](docs/hardware/)。
 
-#### Freenove 板注意事项
+板型二选一，在 menuconfig 的 `Dry Rack 干湿衣架 → 硬件板型` 中切换；
+引脚常量分别位于 [`app_config.h`](main/app_config.h)（I²C）和 [`st7789.c`](components/st7789_display/st7789.c)（LCD）。
+
+| 功能 | 本板（原理图，默认） | Freenove 板 |
+|------|-------------|-------------|
+| I²C SDA | IO6 | IO1 |
+| I²C SCL | IO5 | IO2 |
+| LCD SCK | IO21 | IO21 |
+| LCD MOSI | IO47 | IO42 |
+| LCD RST | IO45 | IO45 |
+| LCD DC | IO40 | IO40 |
+| LCD CS | IO41 | IO41 |
+| LCD 背光 BLK | **悬空（背光常亮）**，可用 `CONFIG_DRYRACK_LCD_BL_GPIO` 指定，默认 -1 | — |
+| WS2812B DIN | IO48（VDD 接 5 V） | IO48 |
+| 重启键 | IO38 | IO38 |
+| 开关机键 | IO39 | IO39 |
+| BOOT / 唤醒键 | IO0（R2 10 K 上拉 + C5 100 nF） | IO0 |
+| 电池电压检测 | IO2（R3/R4 各 100 K 分压 + C6 100 nF） | — |
+
+**本板的两条硬约束**：
+
+1. **BLK 悬空**：`DISPOFF` 只能让屏幕变黑，背光仍亮，低功耗收益打折。
+   要真正省电需飞线把 BLK 接到空闲 IO（IO19 / IO20），再在 menuconfig 里配置背光 GPIO。
+2. **IO2 已被电量检测占用**：所以本板不能选 Freenove 板型（会与分压电路冲突）；
+   该电压目前固件未使用，属硬件预留。
+
+**Freenove 板避坑**：
 
 | 避免使用 | 原因 |
 |----------|------|
-| GPIO 47 | Octal PSRAM DQS 信号，不可用 |
-| GPIO 48 | Octal PSRAM CLK_N，不可靠 |
-| GPIO 46 | VDD_SPI Strapping 脚 |
-| GPIO 5, 6 | CAMA 摄像头 I²C 接口，有外围电路干扰 |
-| GPIO 43, 44 | UART0 控制台 (TX/RX) |
+| GPIO 47 | Octal PSRAM DQS |
+| GPIO 48 | Octal PSRAM CLK_N（WS2812 仍沿用，可能不稳定） |
+| GPIO 46 | VDD_SPI strapping |
+| GPIO 5 / 6 | CAMA 摄像头 I²C 外围电路干扰 |
+| GPIO 43 / 44 | UART0 |
 
-### 电源网络
+### 电源
 
-| 网络 | 连接节点 | 电压 |
-|------|---------|------|
-| **GND** | U3(1,40,41), U9(1,3), U4(1), U7(1) | 0V |
-| **3V3** | U3(2), U7(2), U1(1), U2(4) | 3.29V ✅ |
-| **5V** | U9(2,4), U4(2), RGB1(1) | 5V |
+| 网络 | 节点 | 电压 |
+|------|------|------|
+| GND | U3(1,40,41), U9(1,3), U4(1), U7(1) | 0 V |
+| 3V3 | U3(2), U7(2), U2(4) | 3.29 V |
+| 5V | U9(2,4), U4(2), RGB1(1) | 5 V |
 
 ---
 
-## 二、软件状态
+## 二、软件架构
 
-### 模块状态总览
+### 启动分派
 
-| 模块 | 状态 | 备注 |
+`app_main()` 第一件事是读唤醒原因，然后走两条完全不同的路径：
+
+```
+上电 / 复位 / BOOT 键唤醒        RTC 定时器唤醒
+        │                              │
+        ▼                              ▼
+   run_normal_mode()            run_timer_cycle()
+   ├─ 初始化 LCD + 界面           ├─ 不初始化屏幕
+   ├─ 初始化 AHT30                ├─ 采 3 次取平均
+   ├─ sensor 任务 (1s)            ├─ 连 WiFi、POST webhook
+   ├─ WiFi (STA 或 SoftAP)        └─ 重新进入 deep sleep
+   ├─ HTTP 服务
+   ├─ buttons 任务
+   └─ report 任务 (定时上报)
+```
+
+关键点：**定时唤醒路径绝不初始化 LCD**，也不创建界面任务，尽可能缩短唤醒时间以省电。
+
+### 任务
+
+| 任务 | 优先级 | 栈 | 职责 |
+|------|--------|----|------|
+| `sensor` | 4 | 6144 | 每秒读 AHT30 → 刷屏 → 更新 LED |
+| `net` | 3 | 4096 | 等待 STA 连接结果，更新联网状态角标 |
+| `buttons` | 2 | 3072 | 扫描 IO38 / IO39 / IO0 |
+| `report` | 2 | 5120 | 定时上报、断线重连、执行网页休眠请求 |
+| `httpd` | 5 | 6144 | 配网页 / 状态页 / API |
+
+### 模块职责
+
+| 模块 | 职责 |
+|------|------|
+| [`app_core.c`](main/app_core.c) | I²C 初始化、AHT30 采集、派生量计算、干湿分级、最近读数缓存（临界区保护） |
+| [`app_display.c`](main/app_display.c) | 帧缓冲绘制、局部擦除、位图 alpha 混合、联网状态角标 |
+| [`app_wifi.c`](main/app_wifi.c) | WiFi 状态机、SoftAP 配网、HTTP 服务、webhook 组包与发送 |
+| [`app_power.c`](main/app_power.c) | 唤醒原因解析、关屏、休眠源配置、进入 deep sleep |
+| [`nvs_storage`](components/nvs_storage/) | 通用 KV 读写（字符串 / u8） |
+
+### 数据流
+
+```
+AHT30 ──I²C──> app_core_read()
+                   │
+                   ├─> app_display_update()  ──> 帧缓冲 ──SPI──> ST7789
+                   ├─> app_core_led_set_level() ──RMT──> WS2812B
+                   └─> s_last（临界区） ──> HTTP /api/status
+                                        └─> app_wifi_report() ──> webhook
+```
+
+### 干湿算法
+
+```c
+/* 绝对湿度 g/m³ */
+es = 6.112 * exp(17.67*T / (T + 243.5));      // 饱和水汽压 hPa
+e  = es * RH / 100;
+AH = 216.7 * e / (T + 273.15);
+
+/* 露点 °C（Magnus） */
+γ  = ln(RH/100) + 17.62*T / (243.12 + T);
+Td = 243.12*γ / (17.62 - γ);
+```
+
+分级阈值在 `app_config.h`：`RH_DRY_MAX=45`、`RH_NORMAL_MAX=62`、`RH_DAMP_MAX=78`。
+
+### 预计干衣时间
+
+衣物水分蒸发速率正比于剩余含水量，环境稳定时环境相对湿度按指数衰减：
+
+```
+RH(t) = RH_floor + A · e^(-k·t)
+```
+
+实现见 [`app_core.c`](main/app_core.c) 的 `eta_*` 系列函数：
+
+| 阶段 | 做法 |
+|------|------|
+| 采样 | 每 60 秒记一个 `(ts, RH, T)`，环形缓冲 96 点（约 1.6 小时） |
+| 趋势拟合 | 样本 ≥ 10 时，对 `ln(RH − RH_floor)` 做最小二乘，要求斜率显著为负，得到 k |
+| 外推 | `t = ln((RH_now − floor)/(RH_goal − floor)) / k`，目标是历史最低点 + 2 %RH |
+| 兜底 | 历史不足时用 VPD：`t(h) = 103 / VPD`，VPD 为饱和水汽压差（hPa） |
+| 挂衣识别 | 湿度 1 分钟内突升 > 6 %RH 即清空历史重新记录 |
+
+两条路径都限幅在 48 小时内，超出则上报 `eta_min = -1`（界面显示 `--`）。
+`env_reading_t` 里的 `eta_min` / `eta_by_trend` 会一并写进 webhook 与 `/api/status`。
+
+### 低功耗设计要点
+
+1. **只有 GPIO0~21 能唤醒**。所以 IO39 只用来「进入」低功耗，唤醒交给 BOOT 键 + RTC 定时器。
+2. **唤醒源配置失败时绝不安睡**：`esp_sleep_enable_timer_wakeup` 与
+   `esp_sleep_enable_ext0_wakeup` 都检查返回值，定时器始终兜底，避免原版「睡了叫不醒只能拔电」的问题。
+3. **关屏顺序**：先 `app_core_suspend_updates()` 冻结刷新 → 清黑帧缓冲 → `DISPOFF` → 拉低背光。
+   否则采集任务会在关屏后立刻把屏幕刷亮。
+4. **网页休眠不能直接回调**：HTTP handler 里若直接进深睡会调用 `httpd_stop()` 等待自身返回而死锁，
+   因此改为置标志，由 `report` 任务执行。
+
+---
+
+## 三、HTTP 接口
+
+| 方法 | 路径 | 说明 |
 |------|------|------|
-| AHT30 温湿度 | ✅ 工作 | 每秒采集，数据正常 |
-| ST7789V 显示屏 | ✅ 工作 | **横屏 320×240**，直接帧缓冲渲染 |
-| WS2812B LED | ✅ 工作 | CO2浓度颜色指示 |
-| 仪表盘界面 | ✅ 工作 | 简单直驱，4bpp 位图字体，无 LVGL |
-| NVS 存储 | ✅ 工作 | SGP30基线持久化（待SGP30修复后使用） |
-| SGP30 气体传感器 | ✅ 工作 | I2C Probe 成功，CO2=400ppm 基线稳定中 |
+| GET | `/` | AP 模式：配网页；STA 模式：实时状态页（10 秒自动刷新） |
+| GET | `/api/status` | 当前读数 JSON |
+| GET | `/api/sleep` | 请求进入低功耗 |
+| POST | `/save` | 保存 WiFi 与 webhook 配置并重启 |
 
-### 横屏仪表盘布局 (320×240)
+`/api/status` 返回：
 
-```
-┌────────────────────────────────────┐   0
-│           环境监测仪               │   标题栏 34px
-├────────────────────────────────────┤
-│                                    │
-│        CO2   888   ppm             │   CO2 大数字 (48px)
-│                                    │
-├─────────────────┬──────────────────┤
-│  温度  25.5°C   │   湿度  65%      │   温湿度 (32px 数字)
-├─────────────────┴──────────────────┤
-│ ████████░░░░░░░░  良好             │   CO2 进度条 + 状态
-│ TVOC: xxx ppb                      │   底部信息
-└────────────────────────────────────┘
+```json
+{"device":"dryrack","id":"A1B2C3","valid":true,
+ "temp":25.5,"humi":65,"level":"normal","status":"适宜",
+ "dew":18.1,"ah":14.2,"cold":false,"wifi":"已联网"}
 ```
 
-### 技术架构
+---
 
-- **显示渲染**: 直接操作 RGB565 帧缓冲 (153.6KB)，`app_display_update()` 每帧局部擦除+重绘后调用 `st7789_flush()` 全屏刷新
-- **字体渲染**: 预渲染 4bpp 灰度位图 + alpha 混合，无乱码风险。素材由 `generate_display_assets.py` 生成
-- **无 LVGL 依赖**: 编译更快、固件更小、无内存池开销
+## 四、重构记录
+
+### 从「环境监测仪」到「干湿提醒衣架」的改动
+
+| 项 | 改动 |
+|----|------|
+| SGP30 | 组件整体删除，`app_core` 不再有 IAQ / 基线逻辑，I²C 从双总线简化为单总线 |
+| NVS | 从「SGP30 基线存储」改为通用 KV（WiFi 凭据、webhook、格式） |
+| 显示 | 从 CO₂/TVOC 仪表盘改为温湿度 + 干湿状态；重新生成全部位图素材 |
+| WS2812 | 从「CO₂ 浓度颜色」改为「干湿等级颜色」 |
+| 新增 | `app_wifi`（配网 + HTTP + 上报）、`app_power`（低功耗） |
+| 依赖 | 移除 `lvgl`（本就未使用）、移除 `espressif/led_strip` |
 
 ### 已解决的问题
 
-#### 1. I2C 总线分配混乱（已修复）
-- **原因**: `app_config.h` 注释和 `app_core.c` 的日志/代码互相矛盾
-- **修复**: 统一按硬件连接：I2C0→AHT30(IO5/6), I2C1→SGP30(IO19/20)
-- **文件**: [`app_config.h`](main/app_config.h), [`app_core.c`](main/app_core.c)
+#### 1. `led_strip` 在 IDF v6.1 下编译失败
 
-#### 2. GPIO19/20 被 USB Serial/JTAG 占用（已修复）
-- **原因**: `CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y` 导致 USB 控制器占用这两个引脚
-- **修复**: `sdkconfig.defaults` 添加 `CONFIG_ESP_CONSOLE_SECONDARY_NONE=y`
-- **文件**: [`sdkconfig.defaults`](sdkconfig.defaults)
+`espressif/led_strip` v2.5.5 的 SPI 后端使用了 `heap_caps_calloc` 却没有
+`#include "esp_heap_caps.h"`，IDF v6 不再间接包含该头文件。
 
-#### 3. AHT30 虚假 CRC 警告（已修复）
-- **原因**: 6字节响应格式不含CRC字节
-- **修复**: 移除无效CRC校验，删除 `aht30_crc8` 函数
-- **文件**: [`aht30.c`](components/aht30_driver/aht30.c)
+**修复**：改用原生 RMT 重写 [`ws2812.c`](components/ws2812_led/ws2812.c)，
+用 20 MHz 分辨率 + copy 编码器把每个 bit 编码成一个 `rmt_symbol_word_t`
+（bit0 = 8/17 tick，bit1 = 16/9 tick），彻底去掉外部组件依赖。
 
-#### 4. ST7789V 背光亮但黑屏（已修复）
-- **原因**: ST7789**V** 需要额外电压/Gamma配置
-- **修复**: 初始化序列添加 VCOM/VRH/VDV/Gamma 命令
-- **文件**: [`st7789.c`](components/st7789_display/st7789.c)
+#### 2. `esp_lcd_panel_dev_config_t` 的 `color_space` 字段被移除
 
-#### 5. 中文字体乱码 — 去除 LVGL 直驱方案（最终解决）
-- **原因**: LVGL v9 字体系统复杂，18px 2bpp 字体抗锯齿差、看不清
-- **修复**: 完全移除 LVGL，改用 `generate_display_assets.py` 预渲染 24px/32px/48px 4bpp 位图字体，alpha 混合直接绘制到帧缓冲
-- **文件**: [`generate_display_assets.py`](generate_display_assets.py), [`display_assets/`](components/display_assets/)
+IDF v5.2 起用 `rgb_ele_order` 取代 `color_space`。
 
-#### 6. 代码健壮性修复
-- `sgp30_init()` 探针失败立即返回错误
-- SGP30 不可用时跳过预热阶段
-- ws2812.c 统一使用 `app_config.h` 阈值
-- st7789.c 移除 3秒调试残留
+**修复**：改为 `.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR`。
 
----
+#### 3. `esp_sleep_get_wakeup_cause()` 在 IDF v6 被废弃
 
-## 三、SGP30 故障排查记录
+新接口 `esp_sleep_get_wakeup_causes()` 返回 `BIT(cause)` 位图。
 
-### 诊断过程
+**修复**：`app_power.c` 里用 `ESP_IDF_VERSION` 分支封装成统一的位置图判断，兼容 5.x / 6.x。
 
-1. 初始状态：SGP30 在 I2C0(IO5/IO6) 失败 → `ESP_ERR_INVALID_STATE`
-2. 交换总线：SGP30 在 I2C1(IO19/IO20) 仍失败
-3. AHT30 在两个总线上都正常 → 排除 I2C 控制器和引脚问题
-4. USB 占用排除：禁用 USB Serial/JTAG 后 SGP30 仍失败
-5. **`i2c_master_probe(0x58)` 返回 `ESP_ERR_NOT_FOUND`** → 芯片完全不应答
+#### 4. 组件依赖名变化
 
-### 结论
+IDF v6 把驱动拆成细粒度组件，`driver` 不再包含 `driver/i2c_master.h`。
 
-**SGP30 芯片在 I2C 总线上完全不应答其地址 (0x58)，属于硬件层面的问题。**
+**修复**：`aht30_driver` → `REQUIRES esp_driver_i2c`；
+`st7789_display` → `REQUIRES esp_lcd esp_driver_spi esp_driver_gpio`；
+`ws2812_led` → `REQUIRES esp_driver_rmt`。
 
----
+#### 5. 关屏后又被刷亮
 
-## 四、文件结构
+采集任务每秒写帧缓冲并 `flush()`，`app_power_enter_sleep()` 关屏后它会把屏幕重新点亮。
 
-```
-env_monitor/
-├── main/
-│   ├── main.c              # 入口：FreeRTOS任务创建（无LVGL）
-│   ├── app_core.c/h        # 传感器采集核心（I2C总线+状态机）
-│   ├── app_display.c/h     # 简易仪表盘（直接帧缓冲绘制）
-│   ├── app_config.h        # 引脚/I2C/阈值集中配置
-│   └── CMakeLists.txt
-├── components/
-│   ├── aht30_driver/       # AHT30 温湿度 I2C 驱动
-│   ├── sgp30_driver/       # SGP30 气体传感器 I2C 驱动（含 probe 诊断）
-│   ├── st7789_display/     # ST7789V SPI 驱动（横屏，帧缓冲，无 LVGL）
-│   ├── ws2812_led/         # WS2812B RGB LED 驱动
-│   ├── nvs_storage/        # NVS 基线存储
-│   └── display_assets/     # 预渲染位图素材（4bpp 灰度，自动生成）
-├── generate_display_assets.py  # 显示素材生成脚本
-├── generate_font.py            # （已弃用）LVGL 字体生成脚本
-├── sdkconfig.defaults          # Kconfig 默认值
-├── partitions.csv              # 分区表
-└── esp.md                      # 本文档
-```
+**修复**：新增 `app_core_suspend_updates()`，进入低功耗前先冻结刷新。
+
+#### 6. 历史问题（已在原项目中修复）
+
+- I²C 总线分配混乱 → 统一到 `app_config.h` 单一来源
+- GPIO19/20 被 USB Serial/JTAG 占用 → `CONFIG_ESP_CONSOLE_SECONDARY_NONE=y`
+- AHT30 虚假 CRC 警告 → 去除无效校验
+- ST7789**V** 黑屏 → 补 VCOM/VRH/VDV/Gamma 初始化序列
+- 中文字体乱码 → 弃用 LVGL，改预渲染 4bpp 位图 + alpha 混合
 
 ---
 
 ## 五、常用操作
 
-### 切换板子配置
+### 改干湿阈值
 
-修改两个文件后重新编译：
+编辑 [`app_config.h`](main/app_config.h)：
 
-**1.** [`app_config.h`](main/app_config.h) — I²C 引脚：
 ```c
-// Freenove 板:
-#define I2C_SDA_IO   GPIO_NUM_1
-#define I2C_SCL_IO   GPIO_NUM_2
-// 原板 (双总线):
-#define I2C_SDA_IO   GPIO_NUM_6
-#define I2C_SCL_IO   GPIO_NUM_5
+#define RH_DRY_MAX      45.0f
+#define RH_NORMAL_MAX   62.0f
+#define RH_DAMP_MAX     78.0f
+#define COLD_TEMP_C     12.0f
 ```
 
-**2.** [`st7789.c`](components/st7789_display/st7789.c) — 显示屏 MOSI：
-```c
-// Freenove 板:
-#define LCD_MOSI_IO  GPIO_NUM_42
-// 原板:
-#define LCD_MOSI_IO  GPIO_NUM_47
-```
+### 改低功耗间隔
 
-### 修改显示文字或字号
-编辑 [`generate_display_assets.py`](generate_display_assets.py) 中的 `ASSETS` 列表，然后：
+`idf.py menuconfig` → Dry Rack 干湿衣架 → **低功耗模式采样间隔（分钟）**，默认 30。
+
+写入 `sdkconfig` 的 `CONFIG_DRYRACK_SLEEP_INTERVAL_MIN`，`app_config.h` 直接引用。
+
+### 改上报间隔
+
+同上菜单的 **正常模式联网上报间隔（秒）**，默认 300。
+
+### 改显示的文案 / 字号
+
+1. 编辑 [`generate_display_assets.py`](generate_display_assets.py) 的 `ASSETS` 列表
+2. `python generate_display_assets.py`
+3. 在 `app_display.c` 里用 `BMP(名称)` 引用
+
+### 调试串口
+
+默认走 UART（`CONFIG_ESP_CONSOLE_SECONDARY_NONE=y` 关闭了 USB Serial/JTAG）。
+看日志：
+
 ```bash
-python generate_display_assets.py
-```
-重新编译烧录即可，无需修改 C 代码。注意需要使用 ESP-IDF 自带的 Python（已含 Pillow）：
-```bash
-E:/esp/Espressif/python_env/idf5.5_py3.11_env/Scripts/python.exe generate_display_assets.py
+idf.py -p COM3 monitor
 ```
 
-### 修改 I2C 引脚
-编辑 [`app_config.h`](main/app_config.h) 中的 `I2C0_SCL_IO` / `I2C0_SDA_IO` / `I2C1_SCL_IO` / `I2C1_SDA_IO` 宏。
+---
 
-### 修改 LCD 引脚
-编辑 [`st7789.c`](components/st7789_display/st7789.c) 顶部的 `LCD_SCLK_IO` / `LCD_MOSI_IO` / `LCD_CS_IO` / `LCD_DC_IO` / `LCD_RST_IO` 宏。
+## 六、验证清单（烧录后）
 
-### 修改 WS2812B LED 引脚
-编辑 [`ws2812.c`](components/ws2812_led/ws2812.c) 顶部的 `WS2812_GPIO` / `WS2812_NUM_LEDS` 宏。
-
-### 修改 CO2 阈值
-编辑 [`app_config.h`](main/app_config.h) 中的 `CO2_WARN_THRESHOLD` / `CO2_ALERT_THRESHOLD` 宏（同时影响仪表盘颜色和 LED 指示）。
+- [ ] 启动日志打印「上电 / 复位启动」，屏幕出现标题和温湿度
+- [ ] 湿度低于 45 % 时状态显示「干燥」且 WS2812B 变绿
+- [ ] 无凭据时手机能搜到 `DryRack-XXXX`，打开 `192.168.4.1` 能配网
+- [ ] 配网重启后屏幕右上角变「已联网」，`/api/status` 返回数据
+- [ ] 配置 webhook 后每 5 分钟收到推送
+- [ ] 长按 IO39 屏幕关闭、日志显示「进入低功耗模式」
+- [ ] 等 30 分钟（或临时改成 1 分钟验证）后自动唤醒并推送一次
+- [ ] 深睡时按 BOOT 键能亮屏回到正常模式
+- [ ] 长按 BOOT 8 秒后重启并重新出现配网热点
