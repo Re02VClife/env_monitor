@@ -1,0 +1,51 @@
+menu "Dry Rack 干湿衣架"
+
+    choice DRYRACK_BOARD
+        prompt "硬件板型"
+        default DRYRACK_BOARD_ORIGINAL
+        help
+            决定 I2C 与 LCD 的引脚分配。切换后建议 idf.py fullclean 再编译。
+        config DRYRACK_BOARD_ORIGINAL
+            bool "原 ESP32-S3-WROOM-1 板 (I2C=IO5/IO6, LCD MOSI=IO47)"
+        config DRYRACK_BOARD_FREENOVE
+            bool "Freenove ESP32-S3 WROOM (I2C=IO1/IO2, LCD MOSI=IO42)"
+            help
+                注意：本项目自制板的 IO2 已接电池电压分压电路，
+                在该板上选此项会与电量检测网络冲突，只有换用 Freenove 开发板时才选。
+    endchoice
+
+    config DRYRACK_LCD_BL_GPIO
+        int "LCD 背光控制 GPIO"
+        range -1 48
+        default -1
+        help
+            填 -1 表示背光直接接电源、不受 GPIO 控制。
+            此时低功耗模式只能让屏幕全黑，背光仍会耗电。
+
+    config DRYRACK_BOOT_GPIO
+        int "BOOT 键 GPIO（深睡唤醒源）"
+        range 0 21
+        default 0
+        help
+            ESP32-S3 只有 GPIO0 ~ GPIO21 属于 RTC IO，可作为深睡唤醒源。
+            板载 BOOT 键通常是 GPIO0。
+
+    config DRYRACK_SLEEP_INTERVAL_MIN
+        int "低功耗模式采样间隔（分钟）"
+        range 1 720
+        default 30
+        help
+            进入低功耗后，设备每次深睡这么久再自动唤醒采集一次数据。
+
+    config DRYRACK_REPORT_INTERVAL_S
+        int "正常模式联网上报间隔（秒）"
+        range 30 3600
+        default 300
+
+    config DRYRACK_WEBHOOK_URL
+        string "编译期默认 webhook 地址"
+        default ""
+        help
+            留空则必须在配网页面填写。配网页面保存的地址存在 NVS，优先于这里。
+
+endmenu
