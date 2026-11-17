@@ -58,24 +58,10 @@
 
 > 本项目用板载 **BOOT 键 (GPIO0)** 做唤醒，开关机键 (IO39) 只负责「进入低功耗」。
 
-### 本板的三个硬件约束
+### 外壳与实物图
+<img width="4000" height="3000" alt="b2d19a3d7ab4f8a1a1590a77f7ac4e5e" src="https://github.com/user-attachments/assets/dc65aefc-f558-42c6-bb9d-8c9df855705c" />
+<img width="4000" height="3000" alt="be7fd3c0f45194081b56593b8d81c1ac" src="https://github.com/user-attachments/assets/c8c7e99e-f8bf-41a7-85f3-fd04f504892e" />
 
-**1. TFT 背光 BLK 悬空 —— 软件关不掉背光**
-
-原理图里 TFT 7pin 的 `BLK` 脚打了叉（未连接），背光直接由模块 VCC 供电、上电常亮。
-
-后果是低功耗模式只能把 LCD 控制器 `DISPOFF` 成黑屏，**背光仍会持续耗电（十几 mA 量级）**，
-深睡周期里的平均功耗会被它拉高。
-
-想真正省电可以飞一根线，把 `BLK` 改接到某个空闲 IO（例如 IO19 / IO20），
-再到 menuconfig 里填 **LCD 背光控制 GPIO**，休眠时就会把它拉低。
-
-
-
-**3. 电源**
-
-电池经 **5V3A 充放升压板**输出 5 V，5 V 直接给 WS2812B，再经板上稳压得到 3.3 V 供 MCU 与传感器。
-所以低功耗时的实际功耗还要算上升压板自身的静态损耗，电池端会比芯片端高一些。
 
 ## 硬件资料
 
