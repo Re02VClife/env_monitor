@@ -1,0 +1,35 @@
+# ESP-IDF 构建产物
+build/
+build_*/
+sdkconfig
+sdkconfig.old
+
+# 依赖（idf.py 自动下载）
+managed_components/
+dependencies.lock
+
+# IDE / 工具
+.vscode/
+.clangd
+.clangd/
+*.swp
+*.swo
+
+# 旧版字体（已被 display_assets 替代）
+components/fonts/
+generate_font.py
+
+# 固件烧录
+*.bin
+*.elf
+*.map
+flash_args
+
+# 临时文件
+*.pyc
+__pycache__/
+test_*.png
+
+# 操作系统
+.DS_Store
+Thumbs.db

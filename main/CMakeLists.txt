@@ -1,0 +1,29 @@
+﻿idf_component_register(
+    SRCS
+        "main.c"
+        "app_core.c"
+        "app_display.c"
+        "app_wifi.c"
+        "app_power.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        nvs_flash
+        esp_lcd
+        esp_psram
+        esp_timer
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_http_client
+        esp_http_server
+        esp-tls
+        esp_driver_i2c
+        esp_driver_gpio
+    PRIV_REQUIRES
+        aht30_driver
+        st7789_display
+        ws2812_led
+        nvs_storage
+        display_assets
+)
