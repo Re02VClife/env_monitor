@@ -265,6 +265,7 @@ idf.py -p COM3 flash monitor
 ```
 
 ### 2 · 飞书 机器人
+<img width="679" height="710" alt="7bdcb371bb8e817d16bea321f70a6296" src="https://github.com/user-attachments/assets/01401968-9e83-4bd1-80f5-ff75b57d9b41" />
 
 ```json
 {"msg_type":"text","content":{"text":"【干湿衣架 A1B2C3】适宜..."}}
